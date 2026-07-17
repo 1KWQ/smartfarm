@@ -46,6 +46,7 @@ extern osMessageQueueId_t BLEQueueHandle;
 extern osThreadId_t BLETaskHandle;
 extern osThreadId_t ScreenTaskHandle;
 extern osMutexId_t i2c1MutexHandle;
+extern osMutexId_t uart_tx_mutexHandle;
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/

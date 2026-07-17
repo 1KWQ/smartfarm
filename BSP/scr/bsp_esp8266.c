@@ -1,15 +1,11 @@
 #include "bsp_esp8266.h"
 #include "gpio.h"
-
+#include "usart.h"
+#include <stdio.h>
+#include "string.h"
 /* ==========================================================================
  * [驱动层] 私有变量
  * ========================================================================== */
-/** @brief USART2 句柄 —— 非static, 供stm32f1xx_it.c的USART2_IRQHandler引用 */
-//UART_HandleTypeDef huart2_esp;
-
-/** @brief 串口发送互斥锁 (防止多任务同时发送AT指令) */
-static osMutexId_t uart_tx_mutex = NULL;
-
 /** @brief 环形接收缓冲区 */
 static uint8_t rx_ring_buf[ESP8266_RX_BUF_SIZE];
 
@@ -112,9 +108,18 @@ inline static void ring_buf_put(uint8_t ch)
     rx_wr=(rx_wr+1)%ESP8266_RX_BUF_SIZE;
 }
 
-inline static uint8_t ring_buf_get(uint8_t ch)
+/**
+ * @brief 从缓冲区读取一字节
+ * 
+ * @return uint8_t 读取到的一字节数据
+ * @note 这个函数仅在任务上下文中调用，因为只有任务修改 rx_rd，且只读取 rx_wr
+ */
+static inline uint8_t ring_buf_get(void)
 {
-
+    if (rx_rd == rx_wr) return 0;  /* 缓冲区空：读写指针相等时，缓冲区无数据，返回 0 */
+    uint8_t ch = rx_ring_buf[rx_rd];/* 非空时，从缓冲区取出一个字节，更新读指针，并返回该字节 */
+    rx_rd = (rx_rd + 1) % ESP8266_RX_BUF_SIZE;
+    return ch;
 }
 
 inline static int ring_buf_available(void)
@@ -124,7 +129,7 @@ inline static int ring_buf_available(void)
 
 /**
  * @brief 清空环形缓冲区
- * 
+ * @note AT收发引擎中调用
  */
 inline static void ring_buf_clear(void)
 {
@@ -246,12 +251,67 @@ static void detect_response_end(uint8_t ch)
  * @return ESP8266_Status 返回AT指令的响应结果: ESP8266_OK 命令成功，ESP8266_TIMEOUT 超时，ESP8266_AT_FAIL 返回ERROR
  * 执行流程：
  * 1、获取发送互斥锁（最多等5s）
- * 2、清空循环缓冲区和响应暂存区
- * 3、阻塞发送AT指令字符串（最多等500ms）
+ * 2、清空循环缓冲区和响应暂存区,因为每次调用该函数都是新一轮指令发送和响应判断
+ * 3、阻塞发送AT指令字符串,AT指令一般很短（最多等500ms）
  * 4、等待响应，记录等待时间，超时则退出等待；轮询at_resp_ready标志位（ISR中调用响应检测状态机会置位），每次轮询osdelay(10)，让出cpu 
  * 5、将环形缓冲区内容取出，放到响应暂存区			
  */
 static ESP8266_Status ESP8266_SendCmd(const char *cmd, uint32_t timeout_ms)
 {
-	
+	/* 获取发送互斥锁*/
+	if(osMutexAcquire(uart_tx_mutexHandle,50000) != osOK){
+		return ESP8266_BUSY;//返回模块忙
+	}
+
+	/* 清空循环缓冲区和响应暂存区 */
+	ring_buf_clear();
+	memset(at_response,0,sizeof(at_response));
+	at_resp_ready  = 0;
+    at_resp_result = 0;
+
+	/* 阻塞发送AT指令字符串 */
+	uint16_t len = (uint16_t)strlen(cmd);
+	if(HAL_UART_Transmit(&huart2,(uint8_t*)cmd,len,500) != HAL_OK){
+		/*发送失败*/
+		osMutexRelease(uart_tx_mutex);//释放互斥信号量
+        ESP8266_SetError("SendCmd: UART transmit failed");
+        return ESP8266_SEND_FAIL;
+	}
+
+	/* 等待响应 */
+	uint16_t time = 0;//用来记录等待时间
+	const uint16_t poll_interval = 10;//(问题：const有什么用)	
+	while(time < timeout_ms && at_resp_ready == 0){
+		osDelay(poll_interval);//任务置阻塞态10ms
+		time += poll_interval;//等待时间增加
+	}
+
+	/* 从环形缓冲区复制响应文本 */
+	uint16_t avail = ring_buf_available();
+	uint16_t len_resp = sizeof(at_response);
+	//环形缓冲区数据长度大于响应暂存区大小（问题:宏定义响应暂存区大小和环形缓冲区一样大，都是ESP8266_RX_BUF_SIZE，为什么要比较）
+	if(avail > len_resp-1){//(为什么要-1)
+		avail = len_resp-1;
+	}
+	for(uint16_t i = 0;i < len_resp-1;i++){
+		at_response[i]=rx_ring_buf[rx_rd];
+	}
+
+	/* 超时且未通过状态机匹配，则返回超时*/
+	if(time > timeout_ms && at_resp_ready == 0)
+	{
+		osMutexRelease(uart_tx_mutex);
+		return ESP8266_TIMEOUT;
+	}
+
+	/* 响应字符串匹配ERROR和FAIL*/
+	if(strstr(at_response,"ERROR") != NULL || strstr(at_response,"FAIL") != NULL)
+	{
+		/*字符串匹配成功*/
+		osMutexRelease(uart_tx_mutex);
+		return ESP8266_AT_FAIL;//命令执行失败
+	}
+
+	osMutexRelease(uart_tx_mutex);
+	return ESP8266_OK;
 }
