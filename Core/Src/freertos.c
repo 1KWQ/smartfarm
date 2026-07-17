@@ -62,7 +62,7 @@ osThreadId_t SensorTaskHandle;
 const osThreadAttr_t SensorTask_attributes = {
   .name = "SensorTask",
   .stack_size = 256 * 4,
-  .priority = (osPriority_t) osPriorityNormal,
+  .priority = (osPriority_t) osPriorityAboveNormal,
 };
 /* Definitions for BLETask */
 osThreadId_t BLETaskHandle;
@@ -85,6 +85,13 @@ const osThreadAttr_t InputTask_attributes = {
   .stack_size = 128 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
+/* Definitions for ESP8266Task */
+osThreadId_t ESP8266TaskHandle;
+const osThreadAttr_t ESP8266Task_attributes = {
+  .name = "ESP8266Task",
+  .stack_size = 512 * 4,
+  .priority = (osPriority_t) osPriorityNormal,
+};
 /* Definitions for BLEQueue */
 osMessageQueueId_t BLEQueueHandle;
 const osMessageQueueAttr_t BLEQueue_attributes = {
@@ -100,6 +107,11 @@ osMutexId_t i2c1MutexHandle;
 const osMutexAttr_t i2c1Mutex_attributes = {
   .name = "i2c1Mutex"
 };
+/* Definitions for uart_tx_mutex */
+osMutexId_t uart_tx_mutexHandle;
+const osMutexAttr_t uart_tx_mutex_attributes = {
+  .name = "uart_tx_mutex"
+};
 
 /* Private function prototypes -----------------------------------------------*/
 /* USER CODE BEGIN FunctionPrototypes */
@@ -110,6 +122,7 @@ void StartSensorTask(void *argument);
 extern void StartBLETask(void *argument);
 extern void StartScreenTask(void *argument);
 extern void StartInputTask(void *argument);
+extern void StartESP8266Task(void *argument);
 extern void BeepTimerCallback(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
@@ -126,6 +139,9 @@ void MX_FREERTOS_Init(void) {
   /* Create the mutex(es) */
   /* creation of i2c1Mutex */
   i2c1MutexHandle = osMutexNew(&i2c1Mutex_attributes);
+
+  /* creation of uart_tx_mutex */
+  uart_tx_mutexHandle = osMutexNew(&uart_tx_mutex_attributes);
 
   /* USER CODE BEGIN RTOS_MUTEX */
   /* add mutexes, ... */
@@ -163,6 +179,9 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of InputTask */
   InputTaskHandle = osThreadNew(StartInputTask, NULL, &InputTask_attributes);
+
+  /* creation of ESP8266Task */
+  ESP8266TaskHandle = osThreadNew(StartESP8266Task, NULL, &ESP8266Task_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */

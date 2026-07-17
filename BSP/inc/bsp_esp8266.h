@@ -77,4 +77,6 @@ void ESP8266_UART_IRQHandler(UART_HandleTypeDef *huart);  // 中断入口
 [区域I] 中断服务        — ESP8266_UART_IRQHandler
  * 
  */
+
+ void ESP8266_UART_IRQHandler(UART_HandleTypeDef *huart);
 #endif
