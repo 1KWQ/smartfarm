@@ -35,7 +35,6 @@
 #include "Light.h"
 #include "rain.h"
 #include "soil_moisture.h"
-#include "BeepTimer.h"
 #include "font.h"
 /* USER CODE END Includes */
 
@@ -64,13 +63,6 @@ const osThreadAttr_t SensorTask_attributes = {
   .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityAboveNormal,
 };
-/* Definitions for BLETask */
-osThreadId_t BLETaskHandle;
-const osThreadAttr_t BLETask_attributes = {
-  .name = "BLETask",
-  .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityLow,
-};
 /* Definitions for ScreenTask */
 osThreadId_t ScreenTaskHandle;
 const osThreadAttr_t ScreenTask_attributes = {
@@ -92,16 +84,6 @@ const osThreadAttr_t ESP8266Task_attributes = {
   .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
-/* Definitions for BLEQueue */
-osMessageQueueId_t BLEQueueHandle;
-const osMessageQueueAttr_t BLEQueue_attributes = {
-  .name = "BLEQueue"
-};
-/* Definitions for BeepTimer */
-osTimerId_t BeepTimerHandle;
-const osTimerAttr_t BeepTimer_attributes = {
-  .name = "BeepTimer"
-};
 /* Definitions for i2c1Mutex */
 osMutexId_t i2c1MutexHandle;
 const osMutexAttr_t i2c1Mutex_attributes = {
@@ -119,11 +101,9 @@ const osMutexAttr_t uart_tx_mutex_attributes = {
 /* USER CODE END FunctionPrototypes */
 
 void StartSensorTask(void *argument);
-extern void StartBLETask(void *argument);
 extern void StartScreenTask(void *argument);
 extern void StartInputTask(void *argument);
 extern void StartESP8266Task(void *argument);
-extern void BeepTimerCallback(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -151,17 +131,9 @@ void MX_FREERTOS_Init(void) {
   /* add semaphores, ... */
   /* USER CODE END RTOS_SEMAPHORES */
 
-  /* Create the timer(s) */
-  /* creation of BeepTimer */
-  BeepTimerHandle = osTimerNew(BeepTimerCallback, osTimerPeriodic, NULL, &BeepTimer_attributes);
-
   /* USER CODE BEGIN RTOS_TIMERS */
   /* start timers, add new ones, ... */
   /* USER CODE END RTOS_TIMERS */
-
-  /* Create the queue(s) */
-  /* creation of BLEQueue */
-  BLEQueueHandle = osMessageQueueNew (16, sizeof(char*), &BLEQueue_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* add queues, ... */
@@ -170,9 +142,6 @@ void MX_FREERTOS_Init(void) {
   /* Create the thread(s) */
   /* creation of SensorTask */
   SensorTaskHandle = osThreadNew(StartSensorTask, NULL, &SensorTask_attributes);
-
-  /* creation of BLETask */
-  BLETaskHandle = osThreadNew(StartBLETask, NULL, &BLETask_attributes);
 
   /* creation of ScreenTask */
   ScreenTaskHandle = osThreadNew(StartScreenTask, NULL, &ScreenTask_attributes);

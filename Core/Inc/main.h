@@ -41,9 +41,6 @@ extern "C" {
 
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
-extern osTimerId_t BeepTimerHandle;
-extern osMessageQueueId_t BLEQueueHandle;
-extern osThreadId_t BLETaskHandle;
 extern osThreadId_t ScreenTaskHandle;
 extern osMutexId_t i2c1MutexHandle;
 extern osMutexId_t uart_tx_mutexHandle;
