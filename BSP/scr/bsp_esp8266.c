@@ -1,14 +1,15 @@
 /**
  * @file    bsp_esp8266.c
- * @brief   ESP8266-01S 驱动层 — AT指令引擎 + WiFi/MQTT业务
- * @note    USART2 (TX=PA2, RX=PA3), 115200-8N1
- *          复位引脚 PB0, 调试串口 USART3
+ * @brief   ESP8266-01S 驱动层 — 硬件抽象 + AT指令引擎 (纯驱动, 无业务逻辑)
+ * @note    USART2 (TX=PA2, RX=PA3), 115200-8N1, 复位引脚 PB0
  *
  * 架构分层:
  *   [驱动层-硬件抽象] → 环形缓冲区、HardReset
  *   [驱动层-数据接收] → ISR → ring_buf → detect_response_end 状态机
  *   [驱动层-AT引擎]   → ESP8266_SendCmd (互斥锁+超时+结果解析)
- *   [业务层]          → Init / ConnectWiFi / MQTT_Connect / Publish
+ *   [驱动层-状态管理] → FlushRx / SetState / GetState / SetError / GetLastError
+ *
+ *   [业务层] → 见 APP/service/esp8266config.c
  */
 
 #include "bsp_esp8266.h"
@@ -30,7 +31,7 @@ static volatile uint16_t rx_wr = 0;
 /** @brief 环形缓冲区读指针 (仅任务上下文读取) */
 static volatile uint16_t rx_rd = 0;
 
-/** @brief AT响应文本暂存区 */
+/** @brief AT响应文本暂存区 (单次命令响应快照) */
 static char at_response[ESP8266_RX_BUF_SIZE];
 
 /** @brief 响应已就绪标志 (ISR置1, 任务读后清0) */
@@ -39,20 +40,14 @@ static volatile int at_resp_ready = 0;
 /** @brief 响应结果: 0=无, 1=收到OK, 2=收到ERROR */
 static volatile int at_resp_result = 0;
 
-/** @brief 当前连接状态 */
+/** @brief 当前连接状态 (驱动/业务共用) */
 static volatile ESP8266_ConnState conn_state = ESP8266_STATE_UNINIT;
 
 /** @brief 最后一次错误描述 */
-static char last_error[128] = "";
-
-/** @brief 重连计数器 */
-static uint32_t reconnect_count = 0;
-
-/** @brief 数据上报消息ID (自增) */
-static uint32_t msg_id = 0;
+static char last_error[64] = "";
 
 /* ==========================================================================
- * [驱动层] 响应检测状态机
+ * [驱动层] 响应检测状态机 (私有)
  * ========================================================================== */
 typedef enum {
     DETECT_IDLE = 0,
@@ -72,31 +67,12 @@ static volatile RespDetectState detect_state = DETECT_IDLE;
 /* ==========================================================================
  * [驱动层] 私有函数声明
  * ========================================================================== */
-static void ESP8266_SetError(const char *str);
 static void detect_response_end(uint8_t ch);
-static ESP8266_Status ESP8266_WaitForPattern(const char *pattern,
-                                             uint32_t timeout_ms);
-
-/* ==========================================================================
- * [驱动层] 硬件复位
- * ========================================================================== */
-/**
- * @brief 硬件复位ESP8266模块 (PB0低电平脉冲)
- */
-void ESP8266_HardReset(void)
-{
-    /* 确保复位引脚已初始化为输出 */
-    HAL_GPIO_WritePin(ESP8266_RST_GPIO_Port, ESP8266_RST_Pin, GPIO_PIN_RESET);
-    osDelay(300);   /* 拉低至少200ms, 取300ms留余量 */
-    HAL_GPIO_WritePin(ESP8266_RST_GPIO_Port, ESP8266_RST_Pin, GPIO_PIN_SET);
-    osDelay(1500);  /* 等待模块启动完成 */
-}
 
 /* ==========================================================================
  * [驱动层] 环形缓冲区 (单生产者ISR / 单消费者任务)
  * ========================================================================== */
 
-/** @brief 写入一字节到环形缓冲区 */
 inline static void ring_buf_put(uint8_t ch)
 {
     uint16_t next_wr = (rx_wr + 1) % ESP8266_RX_BUF_SIZE;
@@ -107,7 +83,6 @@ inline static void ring_buf_put(uint8_t ch)
     rx_wr = next_wr;
 }
 
-/** @brief 从环形缓冲区读取一字节 (任务上下文) */
 static inline uint8_t ring_buf_get(void)
 {
     if (rx_rd == rx_wr) return 0;
@@ -116,29 +91,92 @@ static inline uint8_t ring_buf_get(void)
     return ch;
 }
 
-/** @brief 获取环形缓冲区可读字节数 */
 inline static int ring_buf_available(void)
 {
     return (rx_wr - rx_rd + ESP8266_RX_BUF_SIZE) % ESP8266_RX_BUF_SIZE;
 }
 
-/** @brief 清空环形缓冲区 */
 inline static void ring_buf_clear(void)
 {
     rx_rd = rx_wr;
 }
 
 /* ==========================================================================
- * [驱动层] 错误记录
+ * [驱动层] 硬件复位
  * ========================================================================== */
-static void ESP8266_SetError(const char *str)
+/**
+ * @brief 初始化复位引脚并执行硬件复位 (PB0低电平脉冲)
+ * @note  会自动初始化PB0为推挽输出, 可重复调用
+ */
+void ESP8266_HardReset(void)
+{
+    /* 初始化复位引脚 PB0 (可重复调用) */
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin   = ESP8266_RST_Pin;
+    GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull  = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(ESP8266_RST_GPIO_Port, &GPIO_InitStruct);
+
+    /* 低电平脉冲复位 */
+    HAL_GPIO_WritePin(ESP8266_RST_GPIO_Port, ESP8266_RST_Pin, GPIO_PIN_RESET);
+    osDelay(300);
+    HAL_GPIO_WritePin(ESP8266_RST_GPIO_Port, ESP8266_RST_Pin, GPIO_PIN_SET);
+    osDelay(1500);  /* 等待模块启动 */
+}
+
+/* ==========================================================================
+ * [驱动层] 缓冲区与状态管理 (公共API)
+ * ========================================================================== */
+
+/**
+ * @brief 清空接收缓冲区并重置响应检测状态机
+ * @note  业务层在复位/重连前调用, 清除残留数据
+ */
+void ESP8266_FlushRx(void)
+{
+    ring_buf_clear();
+    memset(at_response, 0, sizeof(at_response));
+    at_resp_ready  = 0;
+    at_resp_result = 0;
+    detect_state   = DETECT_IDLE;
+}
+
+/**
+ * @brief 设置模块连接状态 (业务层调用)
+ */
+void ESP8266_SetState(ESP8266_ConnState s)
+{
+    conn_state = s;
+}
+
+/**
+ * @brief 查询当前连接状态
+ */
+ESP8266_ConnState ESP8266_GetState(void)
+{
+    return conn_state;
+}
+
+/**
+ * @brief 记录错误描述
+ */
+void ESP8266_SetError(const char *str)
 {
     strncpy(last_error, str, sizeof(last_error) - 1);
     last_error[sizeof(last_error) - 1] = '\0';
 }
 
+/**
+ * @brief 获取最后一次错误描述
+ */
+const char* ESP8266_GetLastError(void)
+{
+    return last_error;
+}
+
 /* ==========================================================================
- * [驱动层] 响应检测状态机
+ * [驱动层] 响应检测状态机 (私有)
  * ========================================================================== */
 /**
  * @brief ISR中逐字节驱动, 检测AT响应终止序列
@@ -314,16 +352,15 @@ int ESP8266_ResponseContains(const char *str)
 }
 
 /* ==========================================================================
- * [驱动层] 异步模式等待 (用于MQTT连接等异步通知)
+ * [驱动层] 异步模式等待
  * ========================================================================== */
 /**
- * @brief 等待ESP8266异步上报的指定模式
+ * @brief 等待ESP8266异步上报的指定模式 (如 +MQTTCONNECTED)
  * @param pattern    期望包含的字符串
  * @param timeout_ms 超时(ms)
- * @note  不发送AT指令, 仅监听串口接收
+ * @note  不发送AT指令, 仅监听串口接收; 不占用互斥锁
  */
-static ESP8266_Status ESP8266_WaitForPattern(const char *pattern,
-                                             uint32_t timeout_ms)
+ESP8266_Status ESP8266_WaitForPattern(const char *pattern, uint32_t timeout_ms)
 {
     ring_buf_clear();
     memset(at_response, 0, sizeof(at_response));
@@ -360,410 +397,4 @@ static ESP8266_Status ESP8266_WaitForPattern(const char *pattern,
     }
 
     return ESP8266_TIMEOUT;
-}
-
-/* ==========================================================================
- * [业务层] 初始化
- * ========================================================================== */
-
-/**
- * @brief ESP8266初始化: GPIO配置 → 硬件复位 → AT自检
- * @note  调用前需确保USART2已初始化
- */
-ESP8266_Status ESP8266_Init(void)
-{
-    /* 1. 初始化复位引脚 PB0 */
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    GPIO_InitStruct.Pin   = ESP8266_RST_Pin;
-    GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull  = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(ESP8266_RST_GPIO_Port, &GPIO_InitStruct);
-    HAL_GPIO_WritePin(ESP8266_RST_GPIO_Port, ESP8266_RST_Pin, GPIO_PIN_SET);
-
-    /* 2. 硬件复位 */
-    ESP8266_HardReset();
-
-    /* 3. 清空缓冲区 (复位期间可能有乱码) */
-    ring_buf_clear();
-    memset(at_response, 0, sizeof(at_response));
-    at_resp_ready  = 0;
-    at_resp_result = 0;
-    detect_state   = DETECT_IDLE;
-
-    /* 4. AT自检 (尝试3次) */
-    for (int attempt = 1; attempt <= 3; attempt++) {
-        if (ESP8266_AT_Test() == ESP8266_OK) {
-            conn_state = ESP8266_STATE_AT_READY;
-            return ESP8266_OK;
-        }
-        osDelay(500);  /* 间隔500ms重试 */
-    }
-
-    conn_state = ESP8266_STATE_UNINIT;
-    ESP8266_SetError("Init: AT test failed after 3 attempts");
-    return ESP8266_AT_FAIL;
-}
-
-/* ==========================================================================
- * [业务层] AT通信自检
- * ========================================================================== */
-/**
- * @brief 发送AT指令检测通信是否正常
- */
-ESP8266_Status ESP8266_AT_Test(void)
-{
-    /* 先发空命令清空模块缓冲区 */
-    ESP8266_SendCmd("AT\r\n", 1000);
-    osDelay(100);
-
-    /* 正式测试 */
-    ESP8266_Status ret = ESP8266_SendCmd("AT\r\n", ESP8266_AT_TIMEOUT_MS);
-    if (ret == ESP8266_OK && ESP8266_ResponseContains("OK")) {
-        conn_state = ESP8266_STATE_AT_READY;
-        return ESP8266_OK;
-    }
-
-    conn_state = ESP8266_STATE_UNINIT;
-    ESP8266_SetError("AT_Test: no OK response");
-    return ESP8266_AT_FAIL;
-}
-
-/* ==========================================================================
- * [业务层] WiFi管理
- * ========================================================================== */
-/**
- * @brief 连接2.4G WiFi
- * @param ssid     WiFi名称
- * @param password WiFi密码
- */
-ESP8266_Status ESP8266_ConnectWiFi(const char *ssid, const char *password)
-{
-    if (conn_state < ESP8266_STATE_AT_READY) {
-        ESP8266_SetError("ConnectWiFi: not initialized");
-        return ESP8266_NOT_INITIALIZED;
-    }
-
-    /* 1. 设置为Station模式 */
-    ESP8266_Status ret = ESP8266_SendCmd("AT+CWMODE=1\r\n", ESP8266_AT_TIMEOUT_MS);
-    if (ret != ESP8266_OK) {
-        ESP8266_SetError("ConnectWiFi: CWMODE failed");
-        conn_state = ESP8266_STATE_AT_READY;  /* 不影响AT通信 */
-        return ret;
-    }
-    osDelay(200);
-
-    /* 2. 断开已有WiFi (避免重连时状态冲突) */
-    ESP8266_SendCmd("AT+CWQAP\r\n", 3000);
-    osDelay(500);
-
-    /* 3. 连接WiFi */
-    char cmd[256];
-    snprintf(cmd, sizeof(cmd), "AT+CWJAP=\"%s\",\"%s\"\r\n", ssid, password);
-    ret = ESP8266_SendCmd(cmd, ESP8266_LONG_TIMEOUT_MS);
-    if (ret != ESP8266_OK) {
-        ESP8266_SetError("ConnectWiFi: CWJAP failed");
-        conn_state = ESP8266_STATE_AT_READY;
-        return ret;
-    }
-
-    /* 4. 等待获取IP (查询+CIFSR确认) */
-    osDelay(1000);
-    ret = ESP8266_SendCmd("AT+CIFSR\r\n", ESP8266_AT_TIMEOUT_MS);
-    if (ret == ESP8266_OK && ESP8266_ResponseContains("STAIP")) {
-        conn_state = ESP8266_STATE_WIFI_OK;
-        return ESP8266_OK;
-    }
-
-    /* CWJAP返回了OK但未获取到IP, 可能是DHCP较慢, 再等一会 */
-    osDelay(2000);
-    conn_state = ESP8266_STATE_WIFI_OK;  /* 假定连接成功 */
-    return ESP8266_OK;
-}
-
-/* ==========================================================================
- * [业务层] MQTT管理
- * ========================================================================== */
-/**
- * @brief 连接MQTT Broker (OneNET平台)
- * @param broker    MQTT服务器地址
- * @param port      MQTT服务器端口
- * @param client_id 客户端ID (设备名)
- * @param username  用户名 (产品ID)
- * @param password  密码 (设备Token)
- */
-ESP8266_Status ESP8266_MQTT_Connect(const char *broker, uint16_t port,
-                                    const char *client_id,
-                                    const char *username,
-                                    const char *password)
-{
-    if (conn_state < ESP8266_STATE_WIFI_OK) {
-        ESP8266_SetError("MQTT_Connect: WiFi not connected");
-        return ESP8266_WIFI_DISCONNECTED;
-    }
-
-    /* 1. 清理旧MQTT连接 (如果存在) */
-    ESP8266_SendCmd("AT+MQTTCLEAN=0\r\n", 3000);
-    osDelay(300);
-
-    /* 2. 配置MQTT用户参数
-     *    格式: AT+MQTTUSERCFG=<LinkID>,<scheme>,<"client_id">,<"username">,
-     *                           <"password">,<cert_key_ID>,<CA_ID>,<"path">
-     *    scheme=1: MQTT over TCP (非TLS)
-     */
-    char cmd[512];
-    snprintf(cmd, sizeof(cmd),
-             "AT+MQTTUSERCFG=0,1,\"%s\",\"%s\",\"%s\",0,0,\"\"\r\n",
-             client_id, username, password);
-    ESP8266_Status ret = ESP8266_SendCmd(cmd, ESP8266_AT_TIMEOUT_MS);
-    if (ret != ESP8266_OK) {
-        ESP8266_SetError("MQTT_Connect: MQTTUSERCFG failed");
-        return ret;
-    }
-    osDelay(200);
-
-    /* 3. 连接MQTT Broker
-     *    格式: AT+MQTTCONN=<LinkID>,<"host">,<port>,<reconnect>
-     *    reconnect=0: 不自动重连 (由MCU控制重连逻辑)
-     */
-    snprintf(cmd, sizeof(cmd),
-             "AT+MQTTCONN=0,\"%s\",%u,0\r\n", broker, port);
-    ret = ESP8266_SendCmd(cmd, ESP8266_AT_TIMEOUT_MS);
-    if (ret != ESP8266_OK) {
-        ESP8266_SetError("MQTT_Connect: MQTTCONN command failed");
-        conn_state = ESP8266_STATE_WIFI_OK;
-        return ret;
-    }
-
-    /* 4. 等待异步连接结果 (+MQTTCONNECTED:0,<err_code>)
-     *    err_code=0 表示成功
-     */
-    ret = ESP8266_WaitForPattern("+MQTTCONNECTED:0,0", ESP8266_MQTT_TIMEOUT_MS);
-    if (ret == ESP8266_OK) {
-        conn_state = ESP8266_STATE_MQTT_OK;
-        reconnect_count = 0;
-        return ESP8266_OK;
-    }
-
-    /* 连接失败, 状态回退 */
-    ESP8266_SetError("MQTT_Connect: broker connection failed");
-    conn_state = ESP8266_STATE_WIFI_OK;
-    return ESP8266_AT_FAIL;
-}
-
-/**
- * @brief 断开MQTT连接
- */
-ESP8266_Status ESP8266_MQTT_Disconnect(void)
-{
-    if (conn_state < ESP8266_STATE_MQTT_OK) {
-        return ESP8266_MQTT_DISCONNECTED;
-    }
-
-    ESP8266_Status ret = ESP8266_SendCmd("AT+MQTTCLEAN=0\r\n", 5000);
-    osDelay(200);
-
-    conn_state = ESP8266_STATE_WIFI_OK;
-    return ret;
-}
-
-/* ==========================================================================
- * [业务层] MQTT发布
- * ========================================================================== */
-/**
- * @brief 发布JSON字符串到指定主题
- * @param topic MQTT主题
- * @param json  JSON字符串 (内部会做转义)
- * @note  QoS=1
- */
-ESP8266_Status ESP8266_MQTT_PublishJson(const char *topic, const char *json)
-{
-    if (conn_state < ESP8266_STATE_MQTT_OK) {
-        ESP8266_SetError("PublishJson: MQTT not connected");
-        return ESP8266_MQTT_DISCONNECTED;
-    }
-
-    if (topic == NULL || json == NULL) {
-        ESP8266_SetError("PublishJson: null argument");
-        return ESP8266_ERROR;
-    }
-
-    /* 构建转义后的JSON (将 " 转义为 \", \ 转义为 \\) */
-    static char escaped_json[ESP8266_CMD_BUF_SIZE];
-    uint16_t wi = 0;
-    for (uint16_t ri = 0; json[ri] != '\0' && wi < sizeof(escaped_json) - 2; ri++) {
-        if (json[ri] == '\\') {
-            if (wi < sizeof(escaped_json) - 3) {
-                escaped_json[wi++] = '\\';
-                escaped_json[wi++] = '\\';
-            }
-        } else if (json[ri] == '"') {
-            if (wi < sizeof(escaped_json) - 3) {
-                escaped_json[wi++] = '\\';
-                escaped_json[wi++] = '"';
-            }
-        } else {
-            escaped_json[wi++] = json[ri];
-        }
-    }
-    escaped_json[wi] = '\0';
-
-    /* 构建完整AT命令: AT+MQTTPUB=<LinkID>,<"topic">,<"data">,<qos>,<retain> */
-    static char cmd[ESP8266_CMD_BUF_SIZE];
-    int cmd_len = snprintf(cmd, sizeof(cmd),
-                           "AT+MQTTPUB=0,\"%s\",\"%s\",1,0\r\n",
-                           topic, escaped_json);
-
-    if (cmd_len < 0 || cmd_len >= (int)sizeof(cmd)) {
-        ESP8266_SetError("PublishJson: command too long");
-        return ESP8266_BUF_OVERFLOW;
-    }
-
-    ESP8266_Status ret = ESP8266_SendCmd(cmd, ESP8266_AT_TIMEOUT_MS);
-    if (ret != ESP8266_OK) {
-        ESP8266_SetError("PublishJson: publish failed");
-        /* 发布失败可能表示MQTT断线, 标记状态 */
-        if (ESP8266_ResponseContains("CLOSED") ||
-            ESP8266_ResponseContains("DISCONNECTED")) {
-            conn_state = ESP8266_STATE_WIFI_OK;
-        }
-        return ret;
-    }
-
-    return ESP8266_OK;
-}
-
-/**
- * @brief 构建OneNET物模型JSON并上报
- * @param topic         发布主题
- * @param temperature   温度 (℃)
- * @param humidity      湿度 (%)
- * @param soil_moisture 土壤湿度 (%)
- * @param rain          降雨量 (%)
- * @param light         光照强度 (lx)
- * @param pump_state    水泵状态 (0=关, 1=开)
- */
-ESP8266_Status ESP8266_MQTT_PublishProperty(const char *topic,
-                                            float temperature, float humidity,
-                                            uint16_t soil_moisture, uint16_t rain,
-                                            uint16_t light, uint8_t pump_state)
-{
-    if (topic == NULL) {
-        ESP8266_SetError("PublishProperty: null topic");
-        return ESP8266_ERROR;
-    }
-
-    /* 构建OneNET物模型JSON
-     * 格式: {"id":"<msg_id>","version":"1.0","params":{...}}
-     */
-    static char json[ESP8266_CMD_BUF_SIZE];
-    msg_id++;
-
-    int len = snprintf(json, sizeof(json),
-        "{\"id\":\"%lu\",\"version\":\"1.0\",\"params\":{"
-        "\"temperature\":{\"value\":%.1f},"
-        "\"humidity\":{\"value\":%.1f},"
-        "\"soilmoisture\":{\"value\":%u},"
-        "\"rain\":{\"value\":%u},"
-        "\"light\":{\"value\":%u},"
-        "\"pump\":{\"value\":%u}"
-        "}}",
-        (unsigned long)msg_id,
-        (double)temperature, (double)humidity,
-        (unsigned int)soil_moisture, (unsigned int)rain,
-        (unsigned int)light, (unsigned int)pump_state);
-
-    if (len < 0 || len >= (int)sizeof(json)) {
-        ESP8266_SetError("PublishProperty: JSON too long");
-        return ESP8266_BUF_OVERFLOW;
-    }
-
-    return ESP8266_MQTT_PublishJson(topic, json);
-}
-
-/* ==========================================================================
- * [业务层] 连接维护
- * ========================================================================== */
-/**
- * @brief 逐层检查并恢复连接 (WiFi → MQTT)
- * @note  重连间隔5秒, 无限重试
- */
-ESP8266_Status ESP8266_EnsureConnected(
-    const char *ssid, const char *wifi_pwd,
-    const char *broker, uint16_t port,
-    const char *client_id, const char *username, const char *mqtt_pwd)
-{
-    /* 层1: 确保AT通信 */
-    if (conn_state < ESP8266_STATE_AT_READY) {
-        ESP8266_Status ret = ESP8266_Init();
-        if (ret != ESP8266_OK) return ret;
-    }
-
-    /* 层2: 确保WiFi连接 */
-    if (conn_state < ESP8266_STATE_WIFI_OK) {
-        ESP8266_Status ret = ESP8266_ConnectWiFi(ssid, wifi_pwd);
-        if (ret != ESP8266_OK) {
-            reconnect_count++;
-            return ret;
-        }
-    }
-
-    /* 层3: 确保MQTT连接 */
-    if (conn_state < ESP8266_STATE_MQTT_OK) {
-        ESP8266_Status ret = ESP8266_MQTT_Connect(broker, port,
-                                                  client_id, username, mqtt_pwd);
-        if (ret != ESP8266_OK) {
-            reconnect_count++;
-            return ret;
-        }
-    }
-
-    return ESP8266_OK;
-}
-
-/**
- * @brief 一键上报 + 断线重连: 先尝试发布, 失败则重建连接后重试
- */
-ESP8266_Status ESP8266_ReportAndReconnect(
-    const char *topic, const char *json,
-    const char *ssid, const char *wifi_pwd,
-    const char *broker, uint16_t port,
-    const char *client_id, const char *username, const char *mqtt_pwd)
-{
-    /* 尝试直接发布 */
-    ESP8266_Status ret = ESP8266_MQTT_PublishJson(topic, json);
-    if (ret == ESP8266_OK) {
-        return ESP8266_OK;
-    }
-
-    /* 发布失败 → 标记断线 → 重建连接 */
-    if (conn_state == ESP8266_STATE_MQTT_OK) {
-        conn_state = ESP8266_STATE_WIFI_OK;  /* 标记MQTT断线 */
-    }
-
-    ESP8266_SetError("ReportAndReconnect: reconnecting...");
-
-    /* 重建连接链 */
-    ret = ESP8266_EnsureConnected(ssid, wifi_pwd, broker, port,
-                                  client_id, username, mqtt_pwd);
-    if (ret != ESP8266_OK) {
-        return ret;
-    }
-
-    /* 连接恢复, 重试发布 */
-    return ESP8266_MQTT_PublishJson(topic, json);
-}
-
-/* ==========================================================================
- * [业务层] 状态查询
- * ========================================================================== */
-
-ESP8266_ConnState ESP8266_GetState(void)
-{
-    return conn_state;
-}
-
-const char* ESP8266_GetLastError(void)
-{
-    return last_error;
 }

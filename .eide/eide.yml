@@ -36,6 +36,7 @@ targets:
         - Middlewares/Third_Party/FreeRTOS/Source/portable/GCC/ARM_CM3
         - APP/Tasks
         - APP/global
+        - APP/service
       libList: []
     excludeList: []
     settings:

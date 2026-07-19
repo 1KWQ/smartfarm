@@ -103,12 +103,9 @@ int main(void)
   MX_TIM1_Init();
   MX_ADC1_Init();
   MX_ADC2_Init();
-  MX_TIM4_Init();
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
-	HAL_TIM_PWM_Start(&htim4,TIM_CHANNEL_4);
-  HAL_Delay(20);
-  OLED_Init();
+
   /* USER CODE END 2 */
 
   /* Init scheduler */

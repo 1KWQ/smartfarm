@@ -1,3 +1,13 @@
+/**
+ * @file    bsp_esp8266.h
+ * @brief   ESP8266-01S 驱动层头文件 — 纯硬件抽象 + AT引擎
+ * @note    业务层函数 (Init / ConnectWiFi / MQTT_* / Publish) 见 esp8266config.h
+ *
+ * 职责边界:
+ *   [驱动层] → 本文件: 环形缓冲区、ISR、AT指令收发、状态查询
+ *   [业务层] → esp8266config.h: WiFi/MQTT连接管理、数据上报
+ */
+
 #ifndef __BSP_ESP8266_H__
 #define __BSP_ESP8266_H__
 
@@ -6,19 +16,17 @@
 #include <stdint.h>
 
 /* ==========================================================================
- * 硬件引脚配置 — ESP8266-01S
+ * 硬件引脚配置 — ESP8266-01S (USART2: TX=PA2, RX=PA3)
  * ========================================================================== */
 #define ESP8266_RST_Pin         GPIO_PIN_0   /* PB0 — 复位引脚 */
 #define ESP8266_RST_GPIO_Port   GPIOB
 
 /* ==========================================================================
- * 缓冲区与超时
+ * 缓冲区与超时 (驱动层)
  * ========================================================================== */
-#define ESP8266_RX_BUF_SIZE          1024   /* 环形缓冲区字节数 */
-#define ESP8266_AT_TIMEOUT_MS        2000   /* AT命令通用超时 */
-#define ESP8266_LONG_TIMEOUT_MS     15000   /* WiFi连接超时(需扫描信道) */
-#define ESP8266_MQTT_TIMEOUT_MS     10000   /* MQTT连接超时(TCP握手) */
-#define ESP8266_CMD_BUF_SIZE         1024   /* AT命令构建缓冲区 */
+#define ESP8266_RX_BUF_SIZE           512   /* 环形缓冲区字节数       */
+#define ESP8266_AT_TIMEOUT_MS        2000   /* AT命令通用超时(ms)     */
+#define ESP8266_CMD_BUF_SIZE          512   /* AT命令构建缓冲区       */
 
 /* ==========================================================================
  * 函数返回值
@@ -37,7 +45,7 @@ typedef enum {
 } ESP8266_Status;
 
 /* ==========================================================================
- * 模块连接状态 (分层状态机核心)
+ * 模块连接状态 (分层状态机 — 驱动/业务共用)
  * ========================================================================== */
 typedef enum {
     ESP8266_STATE_UNINIT    = 0,  /* 未初始化        */
@@ -47,61 +55,31 @@ typedef enum {
 } ESP8266_ConnState;
 
 /* ==========================================================================
- * 外部引用 — 由 freertos.c 创建
+ * 外部引用 — 由 freertos.c / usart.c 创建
  * ========================================================================== */
 extern osMutexId_t uart_tx_mutexHandle;
 extern UART_HandleTypeDef huart2;
 
 /* ==========================================================================
- * [区域A] 驱动层 — 硬件抽象
+ * [驱动层 API] 硬件抽象
  * ========================================================================== */
-void    ESP8266_HardReset(void);
-void    ESP8266_UART_IRQHandler(UART_HandleTypeDef *huart);
+void ESP8266_HardReset(void);                           /* PB0低电平复位       */
+void ESP8266_UART_IRQHandler(UART_HandleTypeDef *huart); /* USART2中断入口      */
 
 /* ==========================================================================
- * [区域B] 驱动层 — AT引擎
+ * [驱动层 API] AT引擎
  * ========================================================================== */
 ESP8266_Status ESP8266_SendCmd(const char *cmd, uint32_t timeout_ms);
 int            ESP8266_ResponseContains(const char *str);
+ESP8266_Status ESP8266_WaitForPattern(const char *pattern, uint32_t timeout_ms);
 
 /* ==========================================================================
- * [区域C] 业务层 — 初始化与状态
+ * [驱动层 API] 缓冲区与状态管理 (供业务层调用)
  * ========================================================================== */
-ESP8266_Status   ESP8266_Init(void);
-ESP8266_Status   ESP8266_AT_Test(void);
-ESP8266_ConnState ESP8266_GetState(void);
-const char*      ESP8266_GetLastError(void);
-
-/* ==========================================================================
- * [区域D] 业务层 — WiFi管理
- * ========================================================================== */
-ESP8266_Status ESP8266_ConnectWiFi(const char *ssid, const char *password);
-
-/* ==========================================================================
- * [区域E] 业务层 — MQTT管理
- * ========================================================================== */
-ESP8266_Status ESP8266_MQTT_Connect(const char *broker, uint16_t port,
-                                    const char *client_id,
-                                    const char *username,
-                                    const char *password);
-ESP8266_Status ESP8266_MQTT_Disconnect(void);
-ESP8266_Status ESP8266_MQTT_PublishJson(const char *topic, const char *json);
-ESP8266_Status ESP8266_MQTT_PublishProperty(
-    float temperature, float humidity,
-    uint16_t soil_moisture, uint16_t rain,
-    uint16_t light, uint8_t pump_state);
-
-/* ==========================================================================
- * [区域F] 业务层 — 连接维护
- * ========================================================================== */
-ESP8266_Status ESP8266_EnsureConnected(
-    const char *ssid, const char *wifi_pwd,
-    const char *broker, uint16_t port,
-    const char *client_id, const char *username, const char *mqtt_pwd);
-ESP8266_Status ESP8266_ReportAndReconnect(
-    const char *topic, const char *json,
-    const char *ssid, const char *wifi_pwd,
-    const char *broker, uint16_t port,
-    const char *client_id, const char *username, const char *mqtt_pwd);
+void               ESP8266_FlushRx(void);               /* 清空接收缓冲+状态机  */
+void               ESP8266_SetState(ESP8266_ConnState s);
+ESP8266_ConnState  ESP8266_GetState(void);
+void               ESP8266_SetError(const char *str);
+const char*        ESP8266_GetLastError(void);
 
 #endif /* __BSP_ESP8266_H__ */
