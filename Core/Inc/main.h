@@ -61,6 +61,8 @@ void Error_Handler(void);
 /* Private defines -----------------------------------------------------------*/
 #define Beep_Pin GPIO_PIN_7
 #define Beep_GPIO_Port GPIOA
+#define ESP8266_RST_Pin GPIO_PIN_0
+#define ESP8266_RST_GPIO_Port GPIOB
 #define KEY1_Pin GPIO_PIN_12
 #define KEY1_GPIO_Port GPIOB
 #define KEY3_Pin GPIO_PIN_15

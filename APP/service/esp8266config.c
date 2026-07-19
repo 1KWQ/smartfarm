@@ -276,7 +276,8 @@ ESP8266_Status ESP8266_MQTT_PublishJson(const char *topic, const char *json)
 ESP8266_Status ESP8266_MQTT_PublishProperty(const char *topic,
                                             float temperature, float humidity,
                                             uint16_t soil_moisture, uint16_t rain,
-                                            uint16_t light, uint8_t pump_state)
+                                            uint16_t light, uint8_t pump_state,
+                                            uint8_t alarm_state)
 {
     if (topic == NULL) {
         ESP8266_SetError("PublishProperty: null topic");
@@ -302,13 +303,15 @@ ESP8266_Status ESP8266_MQTT_PublishProperty(const char *topic,
         "\\\"soilmoisture\\\":{\\\"value\\\":%u},"
         "\\\"rain\\\":{\\\"value\\\":%u},"
         "\\\"light\\\":{\\\"value\\\":%u},"
-        "\\\"pump\\\":{\\\"value\\\":%u}"
+        "\\\"pump\\\":{\\\"value\\\":%u},"
+        "\\\"alarm\\\":{\\\"value\\\":%u}"
         "}}\",1,0\r\n",
         topic,
         (unsigned long)msg_id,
         (double)temperature, (double)humidity,
         (unsigned int)soil_moisture, (unsigned int)rain,
-        (unsigned int)light, (unsigned int)pump_state);
+        (unsigned int)light, (unsigned int)pump_state,
+        (unsigned int)alarm_state);
 
     if (len < 0 || len >= (int)sizeof(work_buf)) {
         ESP8266_SetError("PublishProperty: command too long");

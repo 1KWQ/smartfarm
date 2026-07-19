@@ -36,4 +36,5 @@ typedef struct {
 
 extern FarmState farmState;
 extern FarmSafeRange farmSafeRange;
+extern uint8_t alarm_state;  /* 本地报警标志: 1=报警中, 0=正常 */
 void EnvSafeRange_Init();

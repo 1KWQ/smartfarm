@@ -75,7 +75,8 @@ ESP8266_Status ESP8266_MQTT_PublishJson(const char *topic, const char *json);
 ESP8266_Status ESP8266_MQTT_PublishProperty(const char *topic,
     float temperature, float humidity,
     uint16_t soil_moisture, uint16_t rain,
-    uint16_t light, uint8_t pump_state);
+    uint16_t light, uint8_t pump_state,
+    uint8_t alarm_state);
 
 /* ==========================================================================
  * [10] 业务层API — 连接维护

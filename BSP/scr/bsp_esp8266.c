@@ -105,19 +105,11 @@ inline static void ring_buf_clear(void)
  * [驱动层] 硬件复位
  * ========================================================================== */
 /**
- * @brief 初始化复位引脚并执行硬件复位 (PB0低电平脉冲)
- * @note  会自动初始化PB0为推挽输出, 可重复调用
+ * @brief 执行硬件复位 (PB0低电平脉冲)
+ * 
  */
 void ESP8266_HardReset(void)
 {
-    /* 初始化复位引脚 PB0 (可重复调用) */
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
-    GPIO_InitStruct.Pin   = ESP8266_RST_Pin;
-    GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull  = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(ESP8266_RST_GPIO_Port, &GPIO_InitStruct);
-
     /* 低电平脉冲复位 */
     HAL_GPIO_WritePin(ESP8266_RST_GPIO_Port, ESP8266_RST_Pin, GPIO_PIN_RESET);
     osDelay(300);

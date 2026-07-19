@@ -81,7 +81,7 @@ const osThreadAttr_t InputTask_attributes = {
 osThreadId_t ESP8266TaskHandle;
 const osThreadAttr_t ESP8266Task_attributes = {
   .name = "ESP8266Task",
-  .stack_size = 256 * 4,
+  .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
 /* Definitions for i2c1Mutex */

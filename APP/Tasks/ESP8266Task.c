@@ -6,7 +6,7 @@
  *   平台:     中国移动 OneNET MQTT (183.230.40.39:1883)
  *   上报周期: 5秒 (ESP8266_REPORT_INTERVAL_MS)
  *   容错:     WiFi/MQTT断线后无限自动重连, 重连间隔5秒
- *   报警:     本地不做阈值判断, 全量上报, 云端配置规则引擎
+ *   报警:     本地阈值判断 + 云端规则引擎双重告警, alarm_state 随数据上报
  *
  *   依赖:
  *     - bsp_esp8266.h  (驱动层)
@@ -79,7 +79,8 @@ static ESP8266_Status ESP8266_ReportOnce(void)
         farmState.soilMoisture,
         farmState.rainGauge,
         farmState.lightIntensity,
-        farmState.waterPumpState
+        farmState.waterPumpState,
+        alarm_state
     );
 
     if (ret == ESP8266_OK) {

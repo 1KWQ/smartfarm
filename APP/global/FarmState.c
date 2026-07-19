@@ -2,6 +2,7 @@
 
 FarmState farmState;//农场环境状态 由Sensortask定期更新
 FarmSafeRange farmSafeRange;//环境安全范围  可通过OLED界面修改
+uint8_t alarm_state = 0;   //本地报警标志: 1=报警中, 0=正常  由Sensortask根据阈值更新
 
 /**
  * @brief 初始化环境安全范围阈值
