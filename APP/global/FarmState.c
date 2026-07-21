@@ -20,14 +20,14 @@ uint8_t alarm_state = 0;   //本地报警标志: 1=报警中, 0=正常  由Senso
 void EnvSafeRange_Init() {
   // 温度范围：15-30摄氏度
   farmSafeRange.minTemperature = 15;
-  farmSafeRange.maxTemperature = 32;
+  farmSafeRange.maxTemperature = 35;
   
   // 湿度范围：20-70%
   farmSafeRange.minHumidity = 20;
   farmSafeRange.maxHumidity = 75;
   
   // 土壤湿度范围：20-80%
-  farmSafeRange.minSoilMoisture = 20;
+  farmSafeRange.minSoilMoisture = 0;
   farmSafeRange.maxSoilMoisture = 65;
   
   // 光照强度范围：30-800勒克斯
