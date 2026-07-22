@@ -49,7 +49,7 @@ void AHT20_READ(float*temperature,float*humidity)
     //通过读取状态字判断是否测量完成（bit[7]=0，测量完成）
     //数组的第一项是状态字
     //一直等待直到测量完成
-    while(ReadBuffer[0] & 0x80!=0x00)
+    while((ReadBuffer[0] & 0x80) != 0x00)
     {
         //等待80ms
         HAL_Delay(90);

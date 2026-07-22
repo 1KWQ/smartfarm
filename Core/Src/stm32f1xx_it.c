@@ -198,7 +198,7 @@ void USART2_IRQHandler(void)
   /* USER CODE BEGIN USART2_IRQn 0 */
   /* ESP8266 驱动完全接管 USART2 中断处理 (RXNE + ORE + FE + PE)
      使用 huart2_esp 句柄以确保与驱动层的环形缓冲区一致 */
-  ESP8266_UART_IRQHandler(&huart2_esp);
+  ESP8266_UART_IRQHandler(&huart2);
   /* USER CODE END USART2_IRQn 0 */
   /* HAL_UART_IRQHandler 不调用: ESP8266 驱动层手动处理所有 USART2 中断标志,
      同时调用 HAL 处理器会导致数据竞争和环形缓冲区数据丢失 */

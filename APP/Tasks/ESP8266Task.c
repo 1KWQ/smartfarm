@@ -73,7 +73,6 @@ static ESP8266_Status ESP8266_ReportOnce(void)
     ESP8266_Status ret;
 
     ret = ESP8266_MQTT_PublishProperty(
-        ONENET_TOPIC_PROPERTY_POST,
         farmState.temperature,
         farmState.humidity,
         farmState.soilMoisture,
@@ -129,7 +128,7 @@ void StartESP8266Task(void *argument)
         }
 
         /* 初始化失败, 记录错误并等待5秒后重试 */
-        char buf[80];
+        char buf[128];
         snprintf(buf, sizeof(buf),
                  "[ESP8266] Init failed (code=%d): %s",
                  (int)ret, ESP8266_GetLastError());

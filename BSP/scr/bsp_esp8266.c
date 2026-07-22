@@ -354,22 +354,41 @@ int ESP8266_ResponseContains(const char *str)
  */
 ESP8266_Status ESP8266_WaitForPattern(const char *pattern, uint32_t timeout_ms)
 {
-    ring_buf_clear();
-    memset(at_response, 0, sizeof(at_response));
+    /* 不清空 ring_buf 和 at_response —
+     * 异步 URC (如 +MQTTCONNECTED) 可能在 SendCmd 返回后、本函数被调用前
+     * 已经到达并存入 ring_buf, 清空会导致丢失. 改为追加模式: 先读已有数据,
+     * 匹配不到再轮询等待新数据.
+     */
     at_resp_ready  = 0;
     at_resp_result = 0;
 
     uint32_t waited = 0;
     const uint32_t poll_interval = 100;
 
+    /* 先将 ring_buf 中已有数据追加到 at_response (保留 SendCmd 遗留内容) */
+    uint16_t avail = ring_buf_available();
+    uint16_t offset = strlen(at_response);
+    if (avail > sizeof(at_response) - offset - 1)
+        avail = sizeof(at_response) - offset - 1;
+    for (uint16_t i = 0; i < avail; i++) {
+        at_response[offset + i] = ring_buf_get();
+    }
+    at_response[offset + avail] = '\0';
+
+    /* 先检查已有数据中是否已包含目标模式 */
+    if (strstr(at_response, pattern) != NULL) {
+        return ESP8266_OK;
+    }
+
+    /* 已有数据不匹配, 进入轮询等待新数据 */
     while (waited < timeout_ms) {
         osDelay(poll_interval);
         waited += poll_interval;
 
-        /* 从环形缓冲区读取最新数据 */
-        uint16_t avail = ring_buf_available();
-        uint16_t offset = strlen(at_response);
-        if (avail >= sizeof(at_response) - offset - 1)
+        /* 从环形缓冲区读取最新数据 (追加到 at_response 末尾) */
+        avail = ring_buf_available();
+        offset = strlen(at_response);
+        if (avail > sizeof(at_response) - offset - 1)
             avail = sizeof(at_response) - offset - 1;
         for (uint16_t i = 0; i < avail; i++) {
             at_response[offset + i] = ring_buf_get();
