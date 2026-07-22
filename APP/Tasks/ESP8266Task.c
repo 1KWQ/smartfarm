@@ -110,9 +110,7 @@ void StartESP8266Task(void *argument)
 {
     (void)argument;
 
-    dbg_println("========================================");
     dbg_println("[ESP8266] Task started");
-    dbg_println("========================================");
 
     /* ======================================================================
      * 阶段1: 初始化连接 (无限重试)
@@ -158,9 +156,8 @@ void StartESP8266Task(void *argument)
         /* 逐层重连 (WiFi → MQTT), 无限重试 */
         for (;;) {
             osDelay(ESP8266_RECONNECT_INTERVAL_MS);
-
             dbg_println("[ESP8266] Reconnecting...");
-            ESP8266_Status recon_ret = ESP8266_ServiceEnsureLink();
+            ESP8266_Status recon_ret = ESP8266_EnsureConnected();
 
             if (recon_ret == ESP8266_OK) {
                 dbg_println("[ESP8266] Reconnect OK, re-reporting...");

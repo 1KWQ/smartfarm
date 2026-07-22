@@ -20,7 +20,7 @@
  * 缓冲区与超时 (驱动层)
  * ========================================================================== */
 #define ESP8266_RX_BUF_SIZE           512   /* 环形缓冲区字节数       */
-#define ESP8266_AT_TIMEOUT_MS        2000   /* AT命令通用超时(ms)     */
+#define ESP8266_AT_TIMEOUT_MS        3500   /* AT命令通用超时(ms)     */
 #define ESP8266_CMD_BUF_SIZE          512   /* AT命令构建缓冲区       */
 
 /* ==========================================================================
@@ -66,7 +66,6 @@ void ESP8266_UART_IRQHandler(UART_HandleTypeDef *huart); /* USART2中断入口  
  * ========================================================================== */
 ESP8266_Status ESP8266_SendCmd(const char *cmd, uint32_t timeout_ms);
 int            ESP8266_ResponseContains(const char *str);
-ESP8266_Status ESP8266_WaitForPattern(const char *pattern, uint32_t timeout_ms);
 
 /* ==========================================================================
  * [驱动层 API] 缓冲区与状态管理 (供业务层调用)

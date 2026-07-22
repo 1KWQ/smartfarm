@@ -178,18 +178,6 @@ ESP8266_Status ESP8266_MQTT_PublishProperty(
  */
 ESP8266_Status ESP8266_EnsureConnected(void);
 
-/**
- * @brief 一键上报 + 断线自动重连 (对外主要接口)
- *
- * 策略: 先尝试直接发布 → 失败则重建连接链 → 重试发布.
- * 连接凭据自动读取, 调用方只需传入 Topic 和 JSON.
- *
- * @param topic MQTT 主题
- * @param json  待发布 JSON
- * @return ESP8266_OK / 错误码
- */
-ESP8266_Status ESP8266_ReportAndReconnect(const char *topic, const char *json);
-
 /* ==========================================================================
  * [11] 业务层 API — 一键服务封装 (简化 Task 调用)
  * ========================================================================== */
@@ -202,14 +190,5 @@ ESP8266_Status ESP8266_ReportAndReconnect(const char *topic, const char *json);
  * @return ESP8266_OK / 失败阶段错误码
  */
 ESP8266_Status ESP8266_ServiceInit(void);
-
-/**
- * @brief 周期性连接维护 — 检查并修复断开 (Task 中周期调用)
- *
- * 内部调用 EnsureConnected, 连接正常时几乎无开销.
- *
- * @return ESP8266_OK / 错误码
- */
-ESP8266_Status ESP8266_ServiceEnsureLink(void);
 
 #endif /* ESP8266_CONFIG_H__ */

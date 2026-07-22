@@ -5,7 +5,7 @@
  * @date    2026-07
  *
  * @note    依赖关系:
- *           - 驱动层 bsp_esp8266.h 提供 AT 引擎 (SendCmd / WaitForPattern / FlushRx)
+ *           - 驱动层 bsp_esp8266.h 提供 AT 引擎 (SendCmd / FlushRx 等)
  *           - FreeRTOS cmsis_os2.h 提供 osDelay / osMutex 等系统调用
  *           - STM32 HAL 库提供 UART 外设操作
  *
@@ -160,9 +160,9 @@ static void dbg_println(const char *msg)
 #endif
 
 /* ==========================================================================
- * 阶段 1: ESP8266 硬件初始化 & AT 通信自检
+ * 阶段 1: ESP8266 硬件初始化 & 基础配置
  *
- * 流程: GPIO/PB0 复位 → 清空 RX 缓冲区垃圾数据 → AT\r\n 探测 (最多 3 次)
+ * 流程: PB0 复位 → 清空 RX → AT 探测 (3次) → 关闭回显 → 设置 Station
  *
  * 为什么需要 3 次重试:
  * - 硬件复位后 ESP8266 需要约 200-500ms 启动
@@ -171,13 +171,12 @@ static void dbg_println(const char *msg)
  * ========================================================================== */
 
 /**
- * @brief ESP8266 初始化 — 硬件复位 + AT 通信自检 (3 次重试)
+ * @brief ESP8266 初始化 — 复位 + AT 自检 + 关闭回显 + 设置 Station
  *
- * @return ESP8266_OK              AT 通信正常, 状态切换为 AT_READY
- * @return ESP8266_AT_FAIL         3 次重试均无 OK 响应, 状态保持 UNINIT
+ * 成功后模块处于 AT_READY 状态, 可直接进行 WiFi 连接.
  *
- * @note  调用本函数前需确保 USART2 和 PB0 已由 CubeMX 初始化
- * @note  内部调用 ESP8266_HardReset() 会拉低 PB0 ≥200ms 后恢复
+ * @return ESP8266_OK              初始化成功, 状态 = AT_READY
+ * @return ESP8266_AT_FAIL         任一阶段失败, 状态 = UNINIT
  */
 ESP8266_Status ESP8266_Init(void)
 {
@@ -190,16 +189,34 @@ ESP8266_Status ESP8266_Init(void)
     /* 步骤 3: 发送 AT\r\n 探测通信, 最多尝试 3 次, 每次间隔 500ms */
     for (int attempt = 1; attempt <= 3; attempt++) {
         if (ESP8266_AT_Test() == ESP8266_OK) {
-            ESP8266_SetState(ESP8266_STATE_AT_READY);
-            return ESP8266_OK;
+            break;
         }
         osDelay(500);  /* 等待 ESP8266 内部状态就绪 */
     }
 
-    /* 3 次均失败: 记录错误, 保持 UNINIT 状态 */
-    ESP8266_SetState(ESP8266_STATE_UNINIT);
-    ESP8266_SetError("Init: AT test failed after 3 attempts");
-    return ESP8266_AT_FAIL;
+    if (ESP8266_GetState() < ESP8266_STATE_AT_READY) {
+        ESP8266_SetState(ESP8266_STATE_UNINIT);
+        ESP8266_SetError("Init: AT test failed after 3 attempts");
+        return ESP8266_AT_FAIL;
+    }
+
+    /* 步骤 4: 关闭回显 — 避免模块回显命令干扰响应解析 */
+    if (ESP8266_SendCmd("ATE0\r\n", ESP8266_AT_TIMEOUT_MS) != ESP8266_OK) {
+        ESP8266_SetState(ESP8266_STATE_UNINIT);
+        ESP8266_SetError("Init: ATE0 failed");
+        return ESP8266_AT_FAIL;
+    }
+
+    /* 步骤 5: 设置 Wi-Fi 模式为 Station (客户端) */
+    if (ESP8266_SendCmd("AT+CWMODE=1\r\n", ESP8266_AT_TIMEOUT_MS) != ESP8266_OK) {
+        ESP8266_SetState(ESP8266_STATE_UNINIT);
+        ESP8266_SetError("Init: CWMODE failed");
+        return ESP8266_AT_FAIL;
+    }
+    osDelay(200);
+
+    ESP8266_SetState(ESP8266_STATE_AT_READY);
+    return ESP8266_OK;
 }
 
 /**
@@ -232,62 +249,73 @@ ESP8266_Status ESP8266_AT_Test(void)
 }
 
 /* ==========================================================================
- * 阶段 2: WiFi 连接 — Station 模式 + DHCP 获取 IP
+ * 阶段 2: WiFi 连接 — 查询优先 + 严格 IP 验证
  *
- * 流程: CWMODE=1 (Station) → CWQAP (断开旧连接) → CWJAP (连接AP)
- *       → CIFSR (查询IP, 确认DHCP成功)
+ * 流程:
+ *   1. CWJAP? 查询当前连接 → 已连目标SSID则跳到步骤2
+ *   2. CIFSR 严格验证IP (排除 0.0.0.0 和 169.254.x.x)
+ *   3. 未通过 → CWJAP 重新连接 → 再验证 IP
  *
  * 状态要求: 调用前必须处于 AT_READY 或更高状态
  * 状态变更: 成功 → WIFI_OK
- *
- * 关键超时: ESP8266_WIFI_TIMEOUT_MS (默认 15000ms)
- *           WiFi 连接涉及 AP 关联 + DHCP, 需要较长超时
  * ========================================================================== */
 
 /**
- * @brief 连接 WiFi 热点 (Station 模式, DHCP 获取 IP)
+ * @brief 连接 WiFi 热点 (查询优先, 避免重复连接)
  *
- * SSID/密码取自 esp8266config.h 宏定义 (ESP8266_WIFI_SSID / ESP8266_WIFI_PASSWORD),
- * 含特殊字符时内部自动转义.
- *
- * @return ESP8266_OK                WiFi 已连接并获取 IP
- * @return ESP8266_NOT_INITIALIZED   AT 通信尚未就绪
- * @return ESP8266_BUF_OVERFLOW      转义后凭据超出缓冲区
- * @return 其他错误码                CWMODE / CWJAP / 超时失败
- *
- * @note  CWQAP 断开旧连接可避免 "已连接但状态冲突" 导致 CWJAP 返回 ERROR
- * @note  CIFSR 查询失败不视为致命错误 — DHCP 可能稍慢, 仍返回 OK
+ * 流程:
+ *   1. AT+CWJAP? 查询当前连接
+ *      - 已连目标 SSID → 跳到步骤2查 IP
+ *      - 已连其他 SSID → CWQAP 断开
+ *      - 查询失败     → 直接执行连接
+ *   2. AT+CIFSR 严格验证 IP (排除 0.0.0.0 和 169.254.x.x)
+ *   3. 未通过则执行 AT+CWJAP 连接, 连接后再次验证 IP
  */
 ESP8266_Status ESP8266_ConnectWiFi(void)
 {
-    /* 前置检查: AT 通信必须已就绪 */
     if (ESP8266_GetState() < ESP8266_STATE_AT_READY) {
         ESP8266_SetError("ConnectWiFi: not initialized");
         return ESP8266_NOT_INITIALIZED;
     }
 
-    /* 步骤 1: 设置 Wi-Fi 模式为 Station (客户端, 非 AP 模式)
-     *        CWMODE=1 → 仅 Station, 不使用 SoftAP
-     */
-    ESP8266_Status ret = ESP8266_SendCmd("AT+CWMODE=1\r\n", ESP8266_AT_TIMEOUT_MS);
-    if (ret != ESP8266_OK) {
-        ESP8266_SetError("ConnectWiFi: CWMODE failed");
-        return ret;
-    }
-    osDelay(200);  /* 等待模式切换生效 */
-
-    /* 步骤 2: 断开已有 WiFi 连接, 避免重连时 "ALREADY CONNECTED" 错误
-     *        CWQAP 在无连接时返回 ERROR 是正常的, 不检查返回值
-     */
-    ESP8266_SendCmd("AT+CWQAP\r\n", 3000);
-    osDelay(500);  /* 等待断开完成 */
-
-    /* 步骤 3: 连接目标 AP
-     *        对 SSID 和密码做 AT 特殊字符转义后拼入命令
-     *        超时使用 ESP8266_WIFI_TIMEOUT_MS (15s) — 包含 AP 关联 + DHCP 时间
-     */
     char cmd[512];
     char esc_ssid[128], esc_pwd[128];
+    ESP8266_Status ret;
+    int need_connect = 1;  /* 默认需要连接 */
+
+    /* -- 步骤1: 查询当前 WiFi 连接 -- */
+    ret = ESP8266_SendCmd("AT+CWJAP?\r\n", ESP8266_AT_TIMEOUT_MS);
+    if (ret == ESP8266_OK) {
+        /* 用 "+CWJAP:\"SSID\"" 精确匹配, 引号作为天然边界,
+         * 避免 "nubia" 误匹配 "nubia_guest" 等子串 */
+        char ssid_pattern[160];
+        snprintf(ssid_pattern, sizeof(ssid_pattern),
+                 "+CWJAP:\"%s\"", ESP8266_WIFI_SSID);
+        if (ESP8266_ResponseContains(ssid_pattern)) {
+            need_connect = 0;  /* 已连目标, 跳过连接 */
+        } else if (ESP8266_ResponseContains("+CWJAP:")) {
+            /* 连的是其他 AP, 先断开 */
+            ESP8266_SendCmd("AT+CWQAP\r\n", 3000);
+            osDelay(500);
+        }
+    }
+    /* 查询失败 (超时/ERROR/No AP) → 降级执行连接 */
+
+    /* -- 步骤2: 验证 IP 地址 (如果已连目标 SSID) -- */
+    if (!need_connect) {
+        ret = ESP8266_SendCmd("AT+CIFSR\r\n", ESP8266_AT_TIMEOUT_MS);
+        if (ret == ESP8266_OK &&
+            ESP8266_ResponseContains("+CIFSR:STAIP") &&
+            !ESP8266_ResponseContains("\"0.0.0.0\"") &&
+            !ESP8266_ResponseContains("\"169.254.")) {
+            ESP8266_SetState(ESP8266_STATE_WIFI_OK);
+            return ESP8266_OK;
+        }
+        /* IP 无效, DHCP 可能失败, 重新连接 */
+        ESP8266_SendCmd("AT+CWQAP\r\n", 3000);
+    }
+
+    /* -- 步骤3: 连接目标 AP -- */
     if (esp8266_escape_at_string(esc_ssid, sizeof(esc_ssid), ESP8266_WIFI_SSID) < 0 ||
         esp8266_escape_at_string(esc_pwd, sizeof(esc_pwd), ESP8266_WIFI_PASSWORD) < 0) {
         ESP8266_SetError("ConnectWiFi: credential too long after escape");
@@ -300,24 +328,20 @@ ESP8266_Status ESP8266_ConnectWiFi(void)
         return ret;
     }
 
-    /* 步骤 4: 查询 IP 地址确认 DHCP 已分配
-     *        CIFSR 返回格式: +CIFSR:STAIP,"192.168.x.x"
-     *        匹配 "STAIP" 子串即可确认
-     */
-    osDelay(1000);
+    /* -- 步骤4: 连接后验证 IP -- */
+    osDelay(2000);  /* 等待 DHCP 完成 */
     ret = ESP8266_SendCmd("AT+CIFSR\r\n", ESP8266_AT_TIMEOUT_MS);
-    if (ret == ESP8266_OK && ESP8266_ResponseContains("STAIP")) {
+    if (ret == ESP8266_OK &&
+        ESP8266_ResponseContains("+CIFSR:STAIP") &&
+        !ESP8266_ResponseContains("\"0.0.0.0\"") &&
+        !ESP8266_ResponseContains("\"169.254.")) {
         ESP8266_SetState(ESP8266_STATE_WIFI_OK);
         return ESP8266_OK;
     }
 
-    /* CWJAP 返回了 OK 但 CIFSR 未看到 STAIP:
-     * DHCP 可能因网络环境较慢尚未完成, 再等待 2 秒后视为成功
-     * (后续 MQTT 连接如果失败会自然回退状态)
-     */
-    osDelay(2000);
-    ESP8266_SetState(ESP8266_STATE_WIFI_OK);
-    return ESP8266_OK;
+    /* DHCP 失败或获取到无效 IP */
+    ESP8266_SetError("ConnectWiFi: DHCP failed, no valid IP");
+    return ESP8266_WIFI_DISCONNECTED;
 }
 
 /* ==========================================================================
@@ -362,7 +386,14 @@ ESP8266_Status ESP8266_MQTT_Connect(void)
         return ESP8266_WIFI_DISCONNECTED;
     }
 
-    /* 步骤 1: 配置 MQTT 用户参数
+    /* 步骤 1: 清理旧 MQTT 实例.
+     *        WiFi 异常断开后 ESP8266 内部 MQTT session 变为僵死状态,
+     *        不清理直接 USERCFG 会返回 ERROR. CLEAN=0 释放连接但不销毁配置.
+     */
+    ESP8266_SendCmd("AT+MQTTCLEAN=0\r\n", 3000);
+    osDelay(200);
+
+    /* 步骤 2: 配置 MQTT 用户参数
      *
      *        AT+MQTTUSERCFG=<LinkID>,<scheme>,
      *                         <"client_id">,<"username">,<"password">,
@@ -393,7 +424,7 @@ ESP8266_Status ESP8266_MQTT_Connect(void)
     }
     osDelay(200);  /* 等待配置写入 NVRAM */
 
-    /* 步骤 2: 发起 MQTT Broker 连接 (MQTT 接入规范 步骤2)
+    /* 步骤 3: 发起 MQTT Broker 连接
      *
      *        AT+MQTTCONN=<LinkID>,<"host">,<port>,<reconnect>
      *
@@ -407,7 +438,7 @@ ESP8266_Status ESP8266_MQTT_Connect(void)
     ESP8266_SendCmd(cmd, ESP8266_AT_TIMEOUT_MS);
     /* 忽略返回值: 无论 OK/ERROR/TIMEOUT, 下一步轮询会确认真实状态 */
 
-    /* 步骤 3: 轮询 AT+MQTTCONN? 确认连接状态 (替代异步 URC 等待)
+    /* 步骤 4: 轮询 AT+MQTTCONN? 确认连接状态
      *
      *        AT+MQTTCONN? 查询命令 (官方文档: MQTT 指令步骤)
      *        响应: +MQTTCONN:<LinkID>,<state>,<scheme>,<"host">,<port>,...
@@ -471,7 +502,7 @@ ESP8266_Status ESP8266_MQTT_Connect(void)
     ESP8266_SetState(ESP8266_STATE_MQTT_OK);
     reconnect_count = 0;
 
-    /* 步骤 4: 订阅主题 (MQTT 接入规范 步骤3)
+    /* 步骤 5: 订阅主题
      *
      *        AT+MQTTSUB=<LinkID>,<"topic">,<qos>
      *
@@ -686,132 +717,118 @@ ESP8266_Status ESP8266_MQTT_PublishProperty(float temperature, float humidity,
 }
 
 /* ==========================================================================
- * 阶段 5: 连接维护 & 断线重连
+ * 阶段 5: 断线诊断 & 分层恢复
  *
- * 分层恢复策略 (逐层检查, 哪层断就从哪层重建):
- *   UNINIT → AT_READY → WIFI_OK → MQTT_OK
+ * 上报失败后执行三层诊断 (底层→上层, 不越级):
+ *   AT 自检 → CWJAP? WiFi诊断 → MQTTCONN? MQTT诊断
  *
- * ReportAndReconnect 的工作流:
- *   1. 尝试直接发布
- *   2. 发布失败 → 标记 MQTT 断线 (状态回退到 WIFI_OK)
- *   3. 调用 EnsureConnected 逐层恢复连接链
- *   4. 重试发布
- *
- * 设计理由:
- * - 不自动重连: 由 MCU 控制重连间隔和次数, 避免模块在弱网下反复震荡
- * - 分层恢复: 只重建断开的层, 不从头初始化, 节省时间
+ * 每层通过 AT 命令查询模块实际状态 (不依赖 conn_state 变量),
+ * 查询失败 (超时/ERROR) 降级为硬件复位.
  * ========================================================================== */
 
 /**
- * @brief 确保连接链完整 — 逐层检查并恢复 (WiFi → MQTT)
+ * @brief 三层诊断重连 — AT → WiFi → MQTT (上报失败后调用)
  *
- * 凭据自动从 esp8266config.h 宏定义读取.
+ * 不再依赖 conn_state 变量判断 (不可靠), 改为发 AT 命令查询模块实际状态,
+ * 诊断到问题后只修复对应层, 保持 conn_state 准确.
  *
- * 按状态机自底向上检查:
- *   - 状态 < AT_READY  → 重新初始化 (硬件复位 + AT 自检)
- *   - 状态 < WIFI_OK   → 重新连接 WiFi
- *   - 状态 < MQTT_OK   → 重新连接 MQTT Broker
- *
- * @return ESP8266_OK  所有层均就绪 (最终状态 = MQTT_OK)
- * @return 其他错误码  某一层恢复失败 (状态停留在失败层)
- *
- * @note  每次调用本函数前尝试直接发布, 失败后才调用本函数 —
- *        这是 "乐观发布, 悲观恢复" 策略: 大多数调用只需状态检查而无需重建.
- * @note  重连失败时 reconnect_count 自增, 可用于监控和告警.
+ * @return ESP8266_OK  三层均通过, 可重新发布
+ * @return 其他错误码  恢复失败
  */
 ESP8266_Status ESP8266_EnsureConnected(void)
 {
-    /* 层 1: 确保 AT 通信正常 (最低层)
-     *       状态 < AT_READY 意味着模块未初始化或 AT 无响应,
-     *       重新执行硬件复位 + AT 自检
-     */
-    if (ESP8266_GetState() < ESP8266_STATE_AT_READY) {
-        ESP8266_Status ret = ESP8266_Init();
-        if (ret != ESP8266_OK) return ret;  /* 基础层失败, 无法继续 */
-    }
+    ESP8266_Status ret;
+    char ssid_pattern[160];
 
-    /* 层 2: 确保 WiFi 已连接
-     *       状态 < WIFI_OK 意味着 WiFi 断线或从未连接,
-     *       重新执行 CWMODE + CWJAP + DHCP 流程
-     */
-    if (ESP8266_GetState() < ESP8266_STATE_WIFI_OK) {
-        ESP8266_Status ret = ESP8266_ConnectWiFi();
+    /* ======================================================================
+     * 层1: AT 通信自检 — 模块是否还活着?
+     * ====================================================================== */
+    ret = ESP8266_SendCmd("AT\r\n", ESP8266_AT_TIMEOUT_MS);
+    if (ret != ESP8266_OK || !ESP8266_ResponseContains("OK")) {
+        /* 通信中断, Init 内部含硬件复位+清RX+AT自检 */
+        ret = ESP8266_Init();
         if (ret != ESP8266_OK) {
-            reconnect_count++;  /* 记录重连失败 */
+            ESP8266_SetError("Reconnect: AT init failed");
             return ret;
         }
     }
 
-    /* 层 3: 确保 MQTT 已连接 (最高层)
-     *       状态 < MQTT_OK 意味着 MQTT 断线或从未连接,
-     *       重新执行 MQTTUSERCFG + MQTTCONN 流程
-     */
-    if (ESP8266_GetState() < ESP8266_STATE_MQTT_OK) {
-        ESP8266_Status ret = ESP8266_MQTT_Connect();
-        if (ret != ESP8266_OK) {
-            reconnect_count++;  /* 记录重连失败 */
-            return ret;
-        }
-    }
-
-    return ESP8266_OK;
-}
-
-/**
- * @brief 一键上报 + 断线自动重连 (对外主要接口)
- *
- * 连接凭据自动从 esp8266config.h 宏定义读取,
- * 调用方只需传入 Topic 和 JSON 数据.
- *
- * 采用 "乐观发布, 悲观恢复" 策略:
- *   1. 先尝试直接发布 (大多数情况下连接正常, 一次成功)
- *   2. 发布失败 → 标记断线 → 重建完整连接链 → 重试发布
- *
- * @param topic     MQTT 主题
- * @param json      待发布的 JSON 字符串
- * @return ESP8266_OK  发布成功
- * @return 其他错误码  发布失败且重连也失败
- *
- * @note  本函数封装了完整的 "发布-失败-重连-重试" 流程.
- *
- * 调用示例:
- * ```
- * ESP8266_ReportAndReconnect(ONENET_TOPIC_PROPERTY_POST, json_str);
- * ```
- */
-ESP8266_Status ESP8266_ReportAndReconnect(const char *topic, const char *json)
-{
-    /* 第一跳: 乐观发布 — 假设当前连接正常, 直接发送 */
-    ESP8266_Status ret = ESP8266_MQTT_PublishJson(topic, json);
-    if (ret == ESP8266_OK) {
-        return ESP8266_OK;  /* 快速路径: 发布成功, 立即返回 */
-    }
-
-    /* 发布失败: 标记 MQTT 断线, 回退状态到 WIFI_OK
-     * (如果已处于更低状态则保持不变, 避免覆盖更严重的错误状态)
-     */
-    if (ESP8266_GetState() == ESP8266_STATE_MQTT_OK) {
-        ESP8266_SetState(ESP8266_STATE_WIFI_OK);
-    }
-
-    ESP8266_SetError("ReportAndReconnect: reconnecting...");
-
-    /* 第二跳: 逐层重建连接链 (WiFi → MQTT) */
-    ret = ESP8266_EnsureConnected();
+    /* ======================================================================
+     * 层2: WiFi 诊断 — 是否连上目标 AP? IP 是否有效?
+     * ====================================================================== */
+    ret = ESP8266_SendCmd("AT+CWJAP?\r\n", ESP8266_AT_TIMEOUT_MS);
     if (ret != ESP8266_OK) {
-        return ret;  /* 重连失败, 向上传递错误 */
+        /* CWJAP? 超时/ERROR → 通信异常, 重新初始化 */
+        ret = ESP8266_Init();
+        if (ret != ESP8266_OK) {
+            ESP8266_SetError("Reconnect: init failed on CWJAP? error");
+            return ret;
+        }
+        goto reconnect_wifi;
     }
 
-    /* 第三跳: 连接恢复, 重试发布 */
-    return ESP8266_MQTT_PublishJson(topic, json);
+    if (ESP8266_ResponseContains("+CWJAP:")) {
+        /* 有 WiFi 连接, 检查 SSID 是否匹配 */
+        snprintf(ssid_pattern, sizeof(ssid_pattern),
+                 "+CWJAP:\"%s\"", ESP8266_WIFI_SSID);
+        if (ESP8266_ResponseContains(ssid_pattern)) {
+            /* SSID 匹配, 验证 IP */
+            ret = ESP8266_SendCmd("AT+CIFSR\r\n", ESP8266_AT_TIMEOUT_MS);
+            if (ret == ESP8266_OK &&
+                ESP8266_ResponseContains("+CIFSR:STAIP") &&
+                !ESP8266_ResponseContains("\"0.0.0.0\"") &&
+                !ESP8266_ResponseContains("\"169.254.")) {
+                /* WiFi OK, IP 有效 */
+                ESP8266_SetState(ESP8266_STATE_WIFI_OK);
+                goto check_mqtt;
+            }
+            /* IP 无效或 SSID 不匹配 → 断开后重连 */
+        }
+        ESP8266_SendCmd("AT+CWQAP\r\n", 3000);
+        osDelay(500);
+    }
+
+reconnect_wifi:
+    ret = ESP8266_ConnectWiFi();
+    if (ret != ESP8266_OK) {
+        reconnect_count++;
+        return ret;
+    }
+    /* WiFi 链路重建后旧 MQTT session 全部失效, 不查询直接重建 */
+    goto reconnect_mqtt;
+
+    /* ======================================================================
+     * 层3: MQTT 诊断 — Broker 连接是否正常?
+     * ====================================================================== */
+check_mqtt:
+    ret = ESP8266_SendCmd("AT+MQTTCONN?\r\n", ESP8266_AT_TIMEOUT_MS);
+    if (ret == ESP8266_OK &&
+        (ESP8266_ResponseContains("+MQTTCONN:0,4") ||
+         ESP8266_ResponseContains("+MQTTCONN:0,5") ||
+         ESP8266_ResponseContains("+MQTTCONN:0,6"))) {
+        /* MQTT 连接正常 (state >= 4), 上报失败可能是瞬态错误 */
+        ESP8266_SetState(ESP8266_STATE_MQTT_OK);
+        return ESP8266_OK;
+    }
+    /* 查询失败 或 state < 4 → 重建 MQTT */
+
+reconnect_mqtt:
+    /* WiFi 重建后旧 MQTT session 全部失效, MQTTCLEAN 在 MQTT_Connect 内部执行 */
+    ESP8266_SetState(ESP8266_STATE_WIFI_OK);
+    ret = ESP8266_MQTT_Connect();
+    if (ret != ESP8266_OK) {
+        reconnect_count++;
+        return ret;
+    }
+    return ESP8266_OK;
 }
 
 /* ==========================================================================
  * 阶段 6: 一键服务封装 — 简化 Task 层调用
  *
- * 对外暴露两个高层 API:
- * - ServiceInit:      系统启动时调用一次, 完成初始化 + 连接
- * - ServiceEnsureLink: 周期性调用 (如每 5 秒), 检查并维护连接
+ * 对外 API:
+ * - ServiceInit:       系统启动时调用一次, 完成初始化 + 连接
+ * - EnsureConnected:   Task 层在上报失败时调用, 逐层恢复连接
  *
  * 凭据从 esp8266config.h 宏定义中读取, 调用方无需传参.
  * ========================================================================== */
@@ -826,8 +843,8 @@ ESP8266_Status ESP8266_ReportAndReconnect(const char *topic, const char *json)
  * @return 其他错误码       失败阶段对应的错误码
  *
  * @note  应在 FreeRTOS 调度器启动后、网络任务创建后调用一次.
- *        如果凭据错误或网络不可达, 返回错误但不阻塞 — 后续由
- *        ServiceEnsureLink 周期性重试.
+ *        如果凭据错误或网络不可达, 返回错误但不阻塞 —
+ *        Task 层会周期性重试 EnsureConnected 恢复连接.
  *
  * 调试输出 (启用 ESP8266_DEBUG_LOG 时):
  * ```
@@ -882,33 +899,3 @@ ESP8266_Status ESP8266_ServiceInit(void)
     return ESP8266_OK;
 }
 
-/**
- * @brief 周期性连接维护 — 检查并修复断开的连接 (供 Task 周期调用)
- *
- * 内部调用 EnsureConnected 逐层检查状态:
- * - 连接正常 → 状态检查通过, 几乎无开销
- * - 连接断开 → 自动重建, reconnect_count 自增
- *
- * @return ESP8266_OK      连接正常
- * @return 其他错误码       连接异常且恢复失败
- *
- * @note  推荐调用周期: 5 秒 (ESP8266_RECONNECT_INTERVAL_MS)
- *         与数据上报周期解耦 — 上报前直接调用 ReportAndReconnect 即可,
- *         本函数作为兜底保活机制.
- *
- * 典型 Task 使用模式:
- * ```
- * void Task_ESP8266(void *arg) {
- *     ESP8266_ServiceInit();
- *     for (;;) {
- *         ESP8266_ServiceEnsureLink();          // 保活检查
- *         ESP8266_MQTT_PublishProperty(...);     // 数据上报
- *         osDelay(ESP8266_REPORT_INTERVAL_MS);   // 周期等待
- *     }
- * }
- * ```
- */
-ESP8266_Status ESP8266_ServiceEnsureLink(void)
-{
-    return ESP8266_EnsureConnected();
-}
