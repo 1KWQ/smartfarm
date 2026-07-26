@@ -1,56 +1,135 @@
-#include "Key.h"
+//Created by kk on 2026/7/7
 
-#define IS_KEY1_PRESSED() HAL_GPIO_ReadPin(KEY1_GPIO_Port,KEY1_Pin)==GPIO_PIN_RESET
-#define IS_KEY3_PRESSED() HAL_GPIO_ReadPin(KEY3_GPIO_Port,KEY3_Pin)==GPIO_PIN_RESET
-/**
- * @brief 检测按键1是否按下
- * 
- * @return uint8_t  0:未按下  1:按下
- * @note 适合用于判断语句中
+#include "Key.h"
+#include "cmsis_os2.h"
+#include "FreeRTOS.h"
+#include "timers.h"
+
+/* 消抖时长 (ms) */
+#define KEY_DEBOUNCE_MS  20
+
+/* freertos.c 中定义的 InputTask 句柄 */
+extern osThreadId_t InputTaskHandle;
+
+/* ---- 静态变量 ---- */
+static TimerHandle_t key1DebounceTimer = NULL;
+static TimerHandle_t key3DebounceTimer = NULL;
+
+/*
+ * ISR 安全标志：用于替代 xTimerIsTimerActive（该函数不可在 ISR 中调用）
+ * ISR 中设 1，定时器回调中清 0
  */
-uint8_t isKey1Clicked()
+static volatile uint8_t key1Debouncing = 0;
+static volatile uint8_t key3Debouncing = 0;
+
+/**
+ * @brief KEY1 消抖定时器回调（定时器守护任务上下文，非 ISR）
+ */
+static void key1DebounceCallback(TimerHandle_t xTimer)
 {
-    static uint8_t pressed=0;//0：未按下  1：已按下
-    //判断是否按下
-    if(IS_KEY1_PRESSED() && !pressed)
+    (void)xTimer;
+    key1Debouncing = 0;  /* 消抖完成，清除标志 */
+
+    /* 读取 GPIO 确认按键是否仍按下（消抖确认） */
+    if (HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin) == GPIO_PIN_RESET)
     {
-        osDelay(15);//延迟消抖
-        if(IS_KEY1_PRESSED())
-        {
-            pressed=1;
-        }
+        osThreadFlagsSet(InputTaskHandle, KEY1_NOTIFY_BIT);
     }
-    //判断是否松开
-    if(!IS_KEY1_PRESSED() && pressed)
-    {
-        pressed=0;
-        return 1;
-    }
-    return 0;
+
+    /* 清除挂起中断 + 重新开启 EXTI 线 12（顺序重要：先清 PR 再开 IMR） */
+    __HAL_GPIO_EXTI_CLEAR_IT(KEY1_Pin);
+    EXTI->IMR |= (EXTI_LINE_KEY1);
 }
+
 /**
- * @brief 检测按键3是否按下
- * 
- * @return uint8_t  0:未按下  1:按下
- * @note 适合用于判断语句中
+ * @brief KEY3 消抖定时器回调（定时器守护任务上下文，非 ISR）
  */
-uint8_t isKey3Clicked()
+static void key3DebounceCallback(TimerHandle_t xTimer)
 {
-    static uint8_t pressed=0;//0：未按下  1：已按下
-    //判断是否按下
-    if(IS_KEY3_PRESSED() && !pressed)
+    (void)xTimer;
+    key3Debouncing = 0;
+
+    if (HAL_GPIO_ReadPin(KEY3_GPIO_Port, KEY3_Pin) == GPIO_PIN_RESET)
     {
-        osDelay(15);//延迟消抖
-        if(IS_KEY3_PRESSED())
+        osThreadFlagsSet(InputTaskHandle, KEY3_NOTIFY_BIT);
+    }
+
+    __HAL_GPIO_EXTI_CLEAR_IT(KEY3_Pin);
+    EXTI->IMR |= (EXTI_LINE_KEY3);
+}
+
+/**
+ * @brief HAL GPIO EXTI 回调（ISR 上下文）
+ * 关闭对应 EXTI 线，启动 20ms 消抖定时器
+ *
+ * 注意：此函数在 ISR 中执行，只能调用 FromISR 后缀的 FreeRTOS API 和
+ *       简单的寄存器访问。严禁调用阻塞函数或非 ISR 安全函数。
+ */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    if (GPIO_Pin == KEY1_Pin)
+    {
+        /* 用 volatile 标志防重入，替代 xTimerIsTimerActive（非 ISR 安全） */
+        if (key1Debouncing)
         {
-            pressed=1;
+            EXTI->PR = (EXTI_LINE_KEY1);  /* 清除抖动挂起的 PR 位 */
+            return;
         }
+        key1Debouncing = 1;
+        EXTI->IMR &= ~(EXTI_LINE_KEY1);   /* 屏蔽 EXTI 线，防止抖动重复触发 */
+
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        if (xTimerStartFromISR(key1DebounceTimer, &xHigherPriorityTaskWoken) != pdPASS)
+        {
+            /* 定时器命令队列满，回滚状态 */
+            key1Debouncing = 0;
+            EXTI->IMR |= (EXTI_LINE_KEY1);
+        }
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
     }
-    //判断是否松开
-    if(!IS_KEY3_PRESSED() && pressed)
+    else if (GPIO_Pin == KEY3_Pin)
     {
-        pressed=0;
-        return 1;
+        if (key3Debouncing)
+        {
+            EXTI->PR = (EXTI_LINE_KEY3);
+            return;
+        }
+        key3Debouncing = 1;
+        EXTI->IMR &= ~(EXTI_LINE_KEY3);
+
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        if (xTimerStartFromISR(key3DebounceTimer, &xHigherPriorityTaskWoken) != pdPASS)
+        {
+            key3Debouncing = 0;
+            EXTI->IMR |= (EXTI_LINE_KEY3);
+        }
+        portYIELD_FROM_ISR(xHigherPriorityTaskWoken);
     }
-    return 0;
+}
+
+/**
+ * @brief 按键模块初始化
+ * 创建两个 20ms 单次消抖定时器
+ * （GPIO EXTI 和 NVIC 已由 CubeMX 在 MX_GPIO_Init() 中配置）
+ */
+void Key_Init(void)
+{
+    key1DebounceTimer = xTimerCreate(
+        "key1_db",
+        pdMS_TO_TICKS(KEY_DEBOUNCE_MS),
+        pdFALSE,                  /* 单次触发 */
+        NULL,
+        key1DebounceCallback
+    );
+    key3DebounceTimer = xTimerCreate(
+        "key3_db",
+        pdMS_TO_TICKS(KEY_DEBOUNCE_MS),
+        pdFALSE,
+        NULL,
+        key3DebounceCallback
+    );
+
+    /* 定时器创建失败则断言（通常不会，除非堆内存耗尽） */
+    configASSERT(key1DebounceTimer != NULL);
+    configASSERT(key3DebounceTimer != NULL);
 }

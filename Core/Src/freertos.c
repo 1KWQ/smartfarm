@@ -68,7 +68,7 @@ osThreadId_t ScreenTaskHandle;
 const osThreadAttr_t ScreenTask_attributes = {
   .name = "ScreenTask",
   .stack_size = 128 * 4,
-  .priority = (osPriority_t) osPriorityBelowNormal5,
+  .priority = (osPriority_t) osPriorityBelowNormal,
 };
 /* Definitions for InputTask */
 osThreadId_t InputTaskHandle;

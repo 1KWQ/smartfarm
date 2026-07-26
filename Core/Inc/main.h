@@ -65,8 +65,10 @@ void Error_Handler(void);
 #define ESP8266_RST_GPIO_Port GPIOB
 #define KEY1_Pin GPIO_PIN_12
 #define KEY1_GPIO_Port GPIOB
+#define KEY1_EXTI_IRQn EXTI15_10_IRQn
 #define KEY3_Pin GPIO_PIN_15
 #define KEY3_GPIO_Port GPIOB
+#define KEY3_EXTI_IRQn EXTI15_10_IRQn
 #define SDA_Pin GPIO_PIN_10
 #define SDA_GPIO_Port GPIOA
 #define SCL_Pin GPIO_PIN_11

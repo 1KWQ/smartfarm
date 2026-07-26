@@ -108,26 +108,48 @@ void StartInputTask(void *argument)
 {
     //旋转编码器初始化
     Knob_Init();
+    //按键模块初始化（GPIO EXTI + 消抖定时器）
+    Key_Init();
+
     for(;;)
     {
+        /*
+         * 阻塞等待按键通知，超时 20ms 用于编码器轮询
+         *   - 按键事件到达：flags 携带 KEY1/KEY3 通知位
+         *   - 超时返回：flags 最高位置位（osFlagsErrorTimeout），忽略
+         */
+        uint32_t flags = osThreadFlagsWait(
+            KEY1_NOTIFY_BIT | KEY3_NOTIFY_BIT,  /* 等待的位 */
+            osFlagsWaitAny,                     /* 任意一位触发即返回 */
+            20U                                 /* 20ms 超时，保证编码器轮询 */
+        );
+
+        /* 超时/错误返回的特征是 bit31 置位，此时不得处理按键事件 */
+        if(flags & osFlagsError) {
+            /* 超时返回，跳过按键处理 */
+        }
         //KEY1按下
-        if(isKey1Clicked())
+        else if(flags & KEY1_NOTIFY_BIT)
         {
             ScreenPage_NextPage();//首页和编辑页切换
         }
-        //页面为编辑页时
-        if(pageIndex == Page_RANGE)
+        //KEY3按下（仅编辑页有效）
+        else if(flags & KEY3_NOTIFY_BIT)
         {
-            KnobDirection direction=Knob_Direction();//储存旋转编码器方向
-            //KEY3按下
-            if(isKey3Clicked())
+            if(pageIndex == Page_RANGE)
             {
                 RangeEditState_Toggle();//编辑页交互模式切换[浏览模式<--->编辑模式]
             }
+        }
+
+        //页面为编辑页时 → 处理编码器
+        if(pageIndex == Page_RANGE)
+        {
+            KnobDirection direction=Knob_Direction();//储存旋转编码器方向
             //交互模式为浏览模式
             if(rangeEditState == RANGE_EDIT_STATE_NORMAL)
             {
-                //左旋 
+                //左旋
                 if(direction == KNOB_DIR_LEFT)
                 {
                     RangeEditIndex_Prev();//切换到上一个编辑项
@@ -153,7 +175,5 @@ void StartInputTask(void *argument)
                 }
             }
         }
-        osDelay(10);
     }
-    
 }

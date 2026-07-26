@@ -200,11 +200,25 @@ void USART2_IRQHandler(void)
      使用 huart2_esp 句柄以确保与驱动层的环形缓冲区一致 */
   ESP8266_UART_IRQHandler(&huart2);
   /* USER CODE END USART2_IRQn 0 */
-  /* HAL_UART_IRQHandler 不调用: ESP8266 驱动层手动处理所有 USART2 中断标志,
-     同时调用 HAL 处理器会导致数据竞争和环形缓冲区数据丢失 */
+  HAL_UART_IRQHandler(&huart2);
   /* USER CODE BEGIN USART2_IRQn 1 */
 
   /* USER CODE END USART2_IRQn 1 */
+}
+
+/**
+  * @brief This function handles EXTI line[15:10] interrupts.
+  */
+void EXTI15_10_IRQHandler(void)
+{
+  /* USER CODE BEGIN EXTI15_10_IRQn 0 */
+
+  /* USER CODE END EXTI15_10_IRQn 0 */
+  HAL_GPIO_EXTI_IRQHandler(KEY1_Pin);
+  HAL_GPIO_EXTI_IRQHandler(KEY3_Pin);
+  /* USER CODE BEGIN EXTI15_10_IRQn 1 */
+
+  /* USER CODE END EXTI15_10_IRQn 1 */
 }
 
 /* USER CODE BEGIN 1 */
