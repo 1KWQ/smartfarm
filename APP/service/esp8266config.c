@@ -666,51 +666,72 @@ ESP8266_Status ESP8266_MQTT_PublishJson(const char *topic, const char *json)
 }
 
 /**
- * @brief OneNET 物模型属性上报 — 分两次发布 (单次命令 < 256 字节)
+ * @brief OneNET 物模型属性上报 — 分三组发布 (单条 < 256 字节)
  *
- * Topic 使用宏 ONENET_TOPIC_PROPERTY_POST, 两次发布同一 Topic、不同 msg_id.
- *
- * 第1次: 环境传感器 (温度/湿度/土壤湿度/雨量)  ~231 字节
- * 第2次: 设备状态   (光照/水泵/告警)            ~177 字节
- *
- * @param temperature   温度值 (°C, 保留 1 位小数)
- * @param humidity      湿度值 (%RH, 保留 1 位小数)
- * @param soil_moisture 土壤湿度 ADC 原始值 (0-4095)
- * @param rain          雨量 ADC 原始值 (0-4095)
- * @param light         光照 ADC 原始值 (0-4095)
- * @param pump_state    水泵状态 (0=关闭, 1=开启)
- * @param alarm_state   告警状态 (0=正常, 1=告警)
- * @return ESP8266_OK            两次发布均成功
- * @return ESP8266_BUF_OVERFLOW  JSON 超出缓冲区
- * @return 其他错误码             任一次 PublishJson 失败即返回
- *
- * @note  每次调用 msg_id 自增 2 (两次发布各占一个 id).
+ *   第1组: 温度/湿度       (2个, ~186字节)
+ *   第2组: 水泵/告警       (2个, ~141字节)
+ *   第3组: 土壤/雨量/光照  (3个, ~165字节)
  */
 ESP8266_Status ESP8266_MQTT_PublishProperty(float temperature, float humidity,
                                             uint16_t soil_moisture, uint16_t rain,
                                             uint16_t light, uint8_t pump_state,
                                             uint8_t alarm_state)
 {
-    /* 状态检查 */
     if (ESP8266_GetState() < ESP8266_STATE_MQTT_OK) {
         ESP8266_SetError("PublishProperty: MQTT not connected");
         return ESP8266_MQTT_DISCONNECTED;
     }
 
-    /* 调试阶段只发温湿度, 单条命令 ~186 字节 */
     char json_buf[200];
+    int len;
+    ESP8266_Status ret;
 
+    /* -- 第1组: 温湿度 -- */
     msg_id++;
-    int len = snprintf(json_buf, sizeof(json_buf),
+    len = snprintf(json_buf, sizeof(json_buf),
         "{\"id\":\"%lu\",\"version\":\"1.0\",\"params\":{"
         "\"temperature\":{\"value\":%.1f},"
         "\"humidity\":{\"value\":%.1f}"
         "}}",
         (unsigned long)msg_id,
         (double)temperature, (double)humidity);
-
     if (len < 0 || len >= (int)sizeof(json_buf)) {
-        ESP8266_SetError("PublishProperty: JSON too long");
+        ESP8266_SetError("PublishProperty: group1 too long");
+        return ESP8266_BUF_OVERFLOW;
+    }
+    ret = ESP8266_MQTT_PublishJson(ONENET_TOPIC_PROPERTY_POST, json_buf);
+    if (ret != ESP8266_OK) return ret;
+
+    /* -- 第2组: 设备状态 -- */
+    msg_id++;
+    len = snprintf(json_buf, sizeof(json_buf),
+        "{\"id\":\"%lu\",\"version\":\"1.0\",\"params\":{"
+        "\"waterPumpState\":{\"value\":%s},"
+        "\"alarm_state\":{\"value\":%s}"
+        "}}",
+        (unsigned long)msg_id,
+        pump_state   ? "true" : "false",
+        alarm_state  ? "true" : "false");
+    if (len < 0 || len >= (int)sizeof(json_buf)) {
+        ESP8266_SetError("PublishProperty: group2 too long");
+        return ESP8266_BUF_OVERFLOW;
+    }
+    ret = ESP8266_MQTT_PublishJson(ONENET_TOPIC_PROPERTY_POST, json_buf);
+    if (ret != ESP8266_OK) return ret;
+
+    /* -- 第3组: 土壤/雨量/光照 -- */
+    msg_id++;
+    len = snprintf(json_buf, sizeof(json_buf),
+        "{\"id\":\"%lu\",\"version\":\"1.0\",\"params\":{"
+        "\"soilMoisture\":{\"value\":%u},"
+        "\"rainGauge\":{\"value\":%u},"
+        "\"lightIntensity\":{\"value\":%u}"
+        "}}",
+        (unsigned long)msg_id,
+        (unsigned int)soil_moisture, (unsigned int)rain,
+        (unsigned int)light);
+    if (len < 0 || len >= (int)sizeof(json_buf)) {
+        ESP8266_SetError("PublishProperty: group3 too long");
         return ESP8266_BUF_OVERFLOW;
     }
     return ESP8266_MQTT_PublishJson(ONENET_TOPIC_PROPERTY_POST, json_buf);
