@@ -8,81 +8,82 @@
 /**
  * @brief 修改选中编辑项的值
  * 先判断当中选中了哪一个编辑项
- * 再根据旋转的方向对其进行修改
+ * 再根据旋转的步数对其进行修改
  * 修改注意事项：修改的最小值不能大于最大安全阈值，修改的最大值不能小于最小安全阈值
  * @param index  当前选中编辑项的索引（RangeEditIndex中的值）
- * @param direction   旋转编码器的方向
+ * @param step   旋转编码器的步数（正数=右旋/增加，负数=左旋/减少）
  * @note  浮点数修改跨度：0.1  整数修改跨度：1
+ *        支持多步一次修改，不再局限于单步 ±1
  */
-void EditRangeValue(RangeEditIndex index,int8_t direction)
+void EditRangeValue(RangeEditIndex index, int8_t step)
 {
     switch(index)
     {
         //选中最低温度
         case RANGE_EDIT_TEMPERATURE_MIN:
             //最小温度不能大于最大温度
-            if(farmSafeRange.minTemperature+0.1*direction < farmSafeRange.maxTemperature)
+            if(farmSafeRange.minTemperature + 0.1f * step < farmSafeRange.maxTemperature)
             {
-                farmSafeRange.minTemperature+=0.1*direction;//修改最低温度
-            }       
+                farmSafeRange.minTemperature += 0.1f * step;//修改最低温度
+            }
             break;
         //选中最高温度
         case RANGE_EDIT_TEMPERATURE_MAX:
             //最高温度不能小于最低温度
-            if(farmSafeRange.maxTemperature+0.1*direction > farmSafeRange.minTemperature)
+            if(farmSafeRange.maxTemperature + 0.1f * step > farmSafeRange.minTemperature)
             {
-                farmSafeRange.maxTemperature+=0.1*direction;//修改最高温度
+                farmSafeRange.maxTemperature += 0.1f * step;//修改最高温度
             }
             break;
         //选中最低湿度
         case RANGE_EDIT_HUMIDITY_MIN:
             //最低湿度不能大于最高湿度
-            if(farmSafeRange.minHumidity+0.1*direction < farmSafeRange.maxHumidity)
+            if(farmSafeRange.minHumidity + 0.1f * step < farmSafeRange.maxHumidity)
             {
-                farmSafeRange.minHumidity+=0.1*direction;//修改最低湿度
+                farmSafeRange.minHumidity += 0.1f * step;//修改最低湿度
             }
             break;
         //选中最高湿度
         case RANGE_EDIT_HUMIDITY_MAX:
             //最高湿度不能低于最低湿度
-            if(farmSafeRange.maxHumidity+0.1*direction > farmSafeRange.minHumidity)
+            if(farmSafeRange.maxHumidity + 0.1f * step > farmSafeRange.minHumidity)
             {
-                farmSafeRange.maxHumidity+=0.1*direction;
+                farmSafeRange.maxHumidity += 0.1f * step;
             }
             break;
         //选中最小光照强度
         case RANGE_EDIT_LIGHT_INTENSITY_MIN:
-            if(farmSafeRange.minLightIntensity+direction < farmSafeRange.maxLightIntensity)
+            if(farmSafeRange.minLightIntensity + step < farmSafeRange.maxLightIntensity)
             {
-               farmSafeRange.minLightIntensity+=direction;
+               farmSafeRange.minLightIntensity += step;
             }
             break;
         //选中最大光照强度
         case RANGE_EDIT_LIGHT_INTENSITY_MAX:
-            if(farmSafeRange.maxLightIntensity+direction > farmSafeRange.minLightIntensity)
+            if(farmSafeRange.maxLightIntensity + step > farmSafeRange.minLightIntensity)
             {
-                farmSafeRange.maxLightIntensity+=direction;
+                farmSafeRange.maxLightIntensity += step;
             }
             break;
         //选中最小土壤湿度
         case RANGE_EDIT_SOIL_MOISTURE_MIN:
-            if(farmSafeRange.minSoilMoisture+direction < farmSafeRange.maxSoilMoisture)
+            if(farmSafeRange.minSoilMoisture + step < farmSafeRange.maxSoilMoisture)
             {
-                farmSafeRange.minSoilMoisture+=direction;
+                farmSafeRange.minSoilMoisture += step;
             }
             break;
         //选中最大土壤湿度
         case RANGE_EDIT_SOIL_MOISTURE_MAX:
-            if(farmSafeRange.maxSoilMoisture+direction > farmSafeRange.minSoilMoisture)
+            if(farmSafeRange.maxSoilMoisture + step > farmSafeRange.minSoilMoisture)
             {
-                farmSafeRange.maxSoilMoisture+=direction;
+                farmSafeRange.maxSoilMoisture += step;
             }
             break;
         //选中最大降水量
         case RANGE_EDIT_RAIN_GAUGE_MAX:
-            if(farmSafeRange.maxRainGauge+direction>0 && farmSafeRange.maxRainGauge+direction<100)
+            if(farmSafeRange.maxRainGauge + step > 0 && farmSafeRange.maxRainGauge + step < 100)
             {
-                farmSafeRange.maxRainGauge+=direction;
+                farmSafeRange.maxRainGauge += step;
             }
         break;
         default:
@@ -132,6 +133,10 @@ void StartInputTask(void *argument)
         else if(flags & KEY1_NOTIFY_BIT)
         {
             ScreenPage_NextPage();//首页和编辑页切换
+            // 刚切换到编辑页 → 丢弃非活跃期间的编码器状态
+            if(pageIndex == Page_RANGE) {
+                Knob_Sync();
+            }
         }
         //KEY3按下（仅编辑页有效）
         else if(flags & KEY3_NOTIFY_BIT)
@@ -145,34 +150,29 @@ void StartInputTask(void *argument)
         //页面为编辑页时 → 处理编码器
         if(pageIndex == Page_RANGE)
         {
-            KnobDirection direction=Knob_Direction();//储存旋转编码器方向
+            int32_t delta = Knob_GetDelta();//获取累计旋转步数（不复位，不丢步）
+            if(delta == 0) {
+                /* 无旋转，跳过 */
+            }
             //交互模式为浏览模式
-            if(rangeEditState == RANGE_EDIT_STATE_NORMAL)
+            else if(rangeEditState == RANGE_EDIT_STATE_NORMAL)
             {
-                //左旋
-                if(direction == KNOB_DIR_LEFT)
+                //左旋：切换到上一个编辑项
+                if(delta < 0)
                 {
-                    RangeEditIndex_Prev();//切换到上一个编辑项
+                    RangeEditIndex_Prev();
                 }
-                //右旋
-                else if(direction == KNOB_DIR_RIGHT)
+                //右旋：切换到下一个编辑项
+                else
                 {
-                    RangeEditIndex_Next();//切换到下一个编辑项
+                    RangeEditIndex_Next();
                 }
             }
             //交互模式为编辑模式(先判断选中了哪个编辑项再编辑其数值)
             else if(rangeEditState == RANGE_EDIT_STATE_EDITING)
             {
-                //左旋-1
-                if(direction == KNOB_DIR_LEFT)
-                {
-                    EditRangeValue(rangeEditIndex,-1);
-                }
-                //右旋+1
-                else if(direction == KNOB_DIR_RIGHT)
-                {
-                    EditRangeValue(rangeEditIndex,1);
-                }
+                //delta 为正=增加，为负=减少，步数直接传递
+                EditRangeValue(rangeEditIndex, (int8_t)delta);
             }
         }
     }

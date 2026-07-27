@@ -74,7 +74,7 @@ const osThreadAttr_t ScreenTask_attributes = {
 osThreadId_t InputTaskHandle;
 const osThreadAttr_t InputTask_attributes = {
   .name = "InputTask",
-  .stack_size = 128 * 4,
+  .stack_size = 256 * 4,
   .priority = (osPriority_t) osPriorityHigh,
 };
 /* Definitions for ESP8266Task */
