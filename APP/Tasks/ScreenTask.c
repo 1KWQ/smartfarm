@@ -9,6 +9,7 @@
 #include "main.h"
 #include "utils.h"
 #include "screen.h"
+#include "service_watchdog.h"
 /**
  * @brief 计算居中文字的开始X坐标
  * 
@@ -251,6 +252,7 @@ void StartScreenTask(void *argument)
     //主循环:持续刷新显示内容
     for(;;)
     {
+        Service_Wdg_FeedTask(WD_TASK_SCREEN);
         OLED_NewFrame();//清空显存
 
         //根据页面索引渲染相应的页面

@@ -21,6 +21,7 @@
 #include "Pump.h"
 #include "cmsis_os2.h"
 #include "main.h"
+#include "service_watchdog.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -121,6 +122,8 @@ void StartESP8266Task(void *argument)
         ESP8266_Status ret = ESP8266_ServiceInit();
 
         if (ret == ESP8266_OK) {
+            Service_Wdg_FeedTask(WD_TASK_ESP);
+            Service_Wdg_FeedESPComm();
             dbg_println("[ESP8266] Connection established, entering report loop");
             break;
         }
@@ -144,6 +147,8 @@ void StartESP8266Task(void *argument)
         ESP8266_Status ret = ESP8266_ReportOnce();
 
         if (ret == ESP8266_OK) {
+            Service_Wdg_FeedTask(WD_TASK_ESP);
+            Service_Wdg_FeedESPComm();
             /* 上报成功 → 等待下一个周期 */
             osDelay(ESP8266_REPORT_INTERVAL_MS);
             continue;
@@ -166,6 +171,8 @@ void StartESP8266Task(void *argument)
                 /* 重连成功 → 立即补发一次数据, 然后回到主循环 */
                 ESP8266_Status pub_ret = ESP8266_ReportOnce();
                 if (pub_ret == ESP8266_OK) {
+                    Service_Wdg_FeedTask(WD_TASK_ESP);
+                    Service_Wdg_FeedESPComm();
                     break;  /* 跳出重连循环, 回到主循环 */
                 }
                 /* 补发失败, 继续重连循环 */

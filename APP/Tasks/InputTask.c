@@ -4,6 +4,7 @@
 #include "screen.h"
 #include "Key.h"
 #include "knob.h"
+#include "service_watchdog.h"
 
 /**
  * @brief 修改选中编辑项的值
@@ -114,6 +115,8 @@ void StartInputTask(void *argument)
 
     for(;;)
     {
+        Service_Wdg_FeedTask(WD_TASK_INPUT);
+        
         /*
          * 阻塞等待按键通知，超时 20ms 用于编码器轮询
          *   - 按键事件到达：flags 携带 KEY1/KEY3 通知位
@@ -157,15 +160,14 @@ void StartInputTask(void *argument)
             //交互模式为浏览模式
             else if(rangeEditState == RANGE_EDIT_STATE_NORMAL)
             {
-                //左旋：切换到上一个编辑项
-                if(delta < 0)
+                //根据旋转步数的绝对值循环切换选中项
+                int32_t steps = (delta < 0) ? -delta : delta;
+                for (int32_t i = 0; i < steps; i++)
                 {
-                    RangeEditIndex_Prev();
-                }
-                //右旋：切换到下一个编辑项
-                else
-                {
-                    RangeEditIndex_Next();
+                    if (delta < 0)
+                        RangeEditIndex_Prev();
+                    else
+                        RangeEditIndex_Next();
                 }
             }
             //交互模式为编辑模式(先判断选中了哪个编辑项再编辑其数值)

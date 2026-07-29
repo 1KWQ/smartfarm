@@ -84,6 +84,13 @@ const osThreadAttr_t ESP8266Task_attributes = {
   .stack_size = 512 * 4,
   .priority = (osPriority_t) osPriorityNormal,
 };
+/* Definitions for WatchdogMonitor */
+osThreadId_t WatchdogMonitorHandle;
+const osThreadAttr_t WatchdogMonitor_attributes = {
+  .name = "WatchdogMonitor",
+  .stack_size = 128 * 4,
+  .priority = (osPriority_t) osPriorityLow,
+};
 /* Definitions for i2c1Mutex */
 osMutexId_t i2c1MutexHandle;
 const osMutexAttr_t i2c1Mutex_attributes = {
@@ -104,6 +111,7 @@ void StartSensorTask(void *argument);
 extern void StartScreenTask(void *argument);
 extern void StartInputTask(void *argument);
 extern void StartESP8266Task(void *argument);
+extern void StartWatchdogMonitorTask(void *argument);
 
 void MX_FREERTOS_Init(void); /* (MISRA C 2004 rule 8.1) */
 
@@ -151,6 +159,9 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of ESP8266Task */
   ESP8266TaskHandle = osThreadNew(StartESP8266Task, NULL, &ESP8266Task_attributes);
+
+  /* creation of WatchdogMonitor */
+  WatchdogMonitorHandle = osThreadNew(StartWatchdogMonitorTask, NULL, &WatchdogMonitor_attributes);
 
   /* USER CODE BEGIN RTOS_THREADS */
   /* add threads, ... */

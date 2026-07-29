@@ -19,6 +19,7 @@
 #include "Light.h"
 #include "main.h"
 #include "rain.h"
+#include "service_watchdog.h"
 #include "soil_moisture.h"
 #include "pump.h"
 #include "beep.h"
@@ -36,7 +37,7 @@ void StartSensorTask(void *argument)
 
     /* ---- 初始化传感器 ---- */
     osMutexAcquire(i2c1MutexHandle, osWaitForever);
-    AHT20_Init();
+    AHT20_Init();  /* osDelay(150)会出让CPU */
     osMutexRelease(i2c1MutexHandle);
 
     Rain_Init();
@@ -44,11 +45,18 @@ void StartSensorTask(void *argument)
 
     /* ---- 主循环: 1秒周期 ---- */
     for (;;) {
+        Service_Wdg_FeedTask(WD_TASK_SENSOR);
         /* 1. 采集所有传感器数据 */
         farmState.lightIntensity = Light_Get();
 
         osMutexAcquire(i2c1MutexHandle, osWaitForever);
-        AHT20_READ(&farmState.temperature, &farmState.humidity);
+        AHT20_Trigger();                                     /* 发送触发命令 (~0.3ms) */
+        osMutexRelease(i2c1MutexHandle);
+
+        osDelay(80);                                          /* 等待AHT20测量完成 (出让CPU, 不持锁) */
+
+        osMutexAcquire(i2c1MutexHandle, osWaitForever);
+        AHT20_ReadResult(&farmState.temperature, &farmState.humidity);  /* 读取数据 (~0.6ms + 可能重试) */
         osMutexRelease(i2c1MutexHandle);
 
         farmState.rainGauge     = Rain_Get();
